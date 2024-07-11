@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "libxdma.h": "c",
+        "xdma_mod.h": "c",
+        "kernel.h": "c",
+        "wait.h": "c",
+        "module.h": "c"
+    }
+}
