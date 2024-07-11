@@ -1,0 +1,1 @@
+cmd_/home/npc/桌面/virtualNet/nv_if_h2c.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000 -z noexecstack   --build-id  -T ./scripts/module-common.lds -o /home/npc/桌面/virtualNet/nv_if_h2c.ko /home/npc/桌面/virtualNet/nv_if_h2c.o /home/npc/桌面/virtualNet/nv_if_h2c.mod.o;  true
