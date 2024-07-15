@@ -74,7 +74,7 @@ extern "C" {
 #define MAC_OFFSET              0 // 14
 #define RING_BUFF_DEPTH         6           // ringbuff中含有1<<RING_BUFF_DEPTH 个PACKAGE
 #define QUEUE_SIZE              100
-#define TIME_OUT                1
+#define TIME_OUT                2000
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define READ_ALIGN              8
 /*******************************************************************************
@@ -250,10 +250,10 @@ static int send_thread(void *data){// write to ddr and send interrupt
 
 static int read_thread(void *data)
 {// 一直等待直到收到buffer为空的消息
-    static u16 offset = 0;
+    static u32 read_offset = 0;
     int ret;
     struct iphdr *iph;// debug, check header
-    offset = ringbuffer->bRdIx*PACK_SIZE;// TODO
+    read_offset = ringbuffer->bRdIx*PACK_SIZE;// TODO
     mydev = dev_get_by_name(&init_net, MHYTUN_DEV_NAME);
     if (!mydev) {
         pr_err("Failed to get network device\n");
@@ -265,12 +265,13 @@ static int read_thread(void *data)
         read_condition = 0;
 
         while(ringbuffer->bRdIx!=ringbuffer->bWrIx){
-            printk(KERN_ERR "read offset=%x, RdIx=%x, WrIx=%x\n",offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
-            if(read_ddr(offset, PACK_SIZE) == -1){
+            printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
+            if(read_ddr(read_offset, PACK_SIZE) == -1){
                 printk(KERN_ERR "read_thread: read ddr error\n");
                 break; 
             }
-            offset = (offset+PACK_SIZE)%RINGBUFFER_SIZE;
+            printk(KERN_ERR "read_offset=%x, RINGBUFFER_SIZE=%x\n",read_offset, RINGBUFFER_SIZE);
+            read_offset = (read_offset+PACK_SIZE)%(RINGBUFFER_SIZE);
             ringbuffer->bRdIx += 1;
             ringbuffer->bRdIx &= ringbuffer->bMax;
         }
@@ -553,7 +554,7 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
 
         
         mb();  // Memory barrier before write
-        // flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
+        flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
         flush_dcache(vaddr, PAGE_SIZE);
         mb();  // Memory barrier after write
 
@@ -789,7 +790,7 @@ static int __init mytun_init(void)
     Read_thread=kthread_run(read_thread, NULL, "read_thread");
     Send_thread=kthread_run(send_thread, NULL, "send_thread");
     Intr_thread=kthread_run(intr_thread, NULL, "intr_thread");
-#if 1
+#if 0
     cpumask_t cpuset;
 
     // set every thread to different cpu
