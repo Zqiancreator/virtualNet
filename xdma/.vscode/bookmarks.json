@@ -4,52 +4,52 @@
 			"path": "zh2c.c",
 			"bookmarks": [
 				{
-					"line": 146,
+					"line": 145,
 					"column": 13,
 					"label": "notify"
 				},
 				{
-					"line": 174,
+					"line": 173,
 					"column": 1,
 					"label": ""
 				},
 				{
-					"line": 230,
+					"line": 229,
 					"column": 0,
 					"label": "rx-handler"
 				},
 				{
-					"line": 397,
+					"line": 396,
 					"column": 22,
 					"label": "Rx_thread"
 				},
 				{
-					"line": 453,
+					"line": 452,
 					"column": 42,
 					"label": ""
 				},
 				{
-					"line": 491,
+					"line": 490,
 					"column": 29,
 					"label": "timercallback"
 				},
 				{
-					"line": 503,
+					"line": 502,
 					"column": 17,
 					"label": ""
 				},
 				{
-					"line": 717,
+					"line": 716,
 					"column": 34,
 					"label": "init"
 				},
 				{
-					"line": 751,
+					"line": 769,
 					"column": 16,
 					"label": "exit"
 				},
 				{
-					"line": 365,
+					"line": 364,
 					"column": 1,
 					"label": ""
 				}

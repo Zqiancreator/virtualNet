@@ -58,7 +58,7 @@ extern "C" {
 #define PCI_VID                 0x10EE
 #define PCI_PID                 0x9034
 #define SGL_NUM                 2
-#define TIME_OUT                2000
+#define TIME_OUT                5
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH         6
 
@@ -731,7 +731,7 @@ static int __init mytun_init(void)
     } 
 
 
-#if 0
+#if 1
     cpumask_t cpuset;
 
     // set every thread to different cpu

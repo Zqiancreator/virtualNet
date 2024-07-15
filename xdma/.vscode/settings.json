@@ -4,6 +4,7 @@
         "xdma_mod.h": "c",
         "kernel.h": "c",
         "wait.h": "c",
-        "module.h": "c"
+        "module.h": "c",
+        "zringbuffer.h": "c"
     }
 }

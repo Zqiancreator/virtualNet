@@ -3693,8 +3693,48 @@ unmap_sgl:
 }
 EXPORT_SYMBOL(xdma_xfer_submit);
 
+void flush_dcache(void *start, size_t size) {
+    uintptr_t addr = (uintptr_t)start;
+    uintptr_t end = addr + size;
+	size_t cache_line_size = boot_cpu_data.x86_clflush_size;// 缓存行大小
+    // 确保内存操作顺序
+    asm volatile ("mfence" ::: "memory");
+	addr = addr & ~(cache_line_size - 1);
+
+    while (addr < end) {
+        asm volatile ("clflush (%0)" :: "r"(addr) : "memory");
+        addr += cache_line_size; 
+    }
+
+    // 确保所有缓存操作完成
+    asm volatile ("mfence" ::: "memory");
+}
+
 ssize_t my_xdma_xfer_submit(void *dev_hndl, int channel, u64 ep_addr,
                          struct sg_table *sgt, int timeout_ms) {
+#if 1
+    mb(); // 保证所有写操作已经完成
+	#if 1 /*自己写缓存刷新函数*/
+		int i;
+		struct scatterlist *sg;
+		for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
+			printk(KERN_ERR "sg->length:%d, sizeof(struct scatterlist):%ld\n", sg->length, sizeof(struct scatterlist));
+			void *virt_addr = sg_virt(sg);
+			dma_addr_t dma_addr = sg_dma_address(sg);
+			
+			// printk(KERN_INFO "Flushing dcache for sg[%d]: virt_addr=%p, length=%u, dma_addr=%pad\n", 
+			// 	i, virt_addr, sg->length, &dma_addr);
+			flush_dcache(sg_virt(sg), sg->length);
+			clflush_cache_range(sgt->sgl, sgt->orig_nents * 1500); // 系统刷新缓存函数
+
+			mb(); // 保证所有写操作已经完成
+				
+		}
+	#endif
+
+    mb(); // 保证所有写操作已经完成
+#endif
+
     struct xdma_dev *xdev = (struct xdma_dev *)dev_hndl;
     struct xdma_engine *engine;
     int rv = 0, nents;
