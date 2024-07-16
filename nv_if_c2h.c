@@ -526,8 +526,8 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
     currentSize = write_size > PAGE_SIZE? write_size - PAGE_SIZE:0;
     int testPageIndex =Page_index;
 
-    iph = (struct iphdr *)(skb_network_header(skb));
-    printk(KERN_ERR "debug write ddr Protocol:%d, len:%d, ipsaddr:%x, daddr:%x,offst=%x\n",iph->protocol, skb->len, iph->saddr, iph->daddr,offst);
+    // iph = (struct iphdr *)(skb_network_header(skb));
+    // printk(KERN_ERR "debug write ddr Protocol:%d, len:%d, ipsaddr:%x, daddr:%x,offst=%x\n",iph->protocol, skb->len, iph->saddr, iph->daddr,offst);
     // printk(KERN_ERR "debug write ddr pfn:%d, PageIndex:%d, writeSize:%x, currentSize:%x,offst=%x\n",pfn, Page_index, write_size, currentSize,offst);
     while (write_size > 0) {
         page = pfn_to_page(pfn);
@@ -546,15 +546,17 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
         // 访问内存
         for (; Page_index < write_size && Page_index < PAGE_SIZE; index += 4, Page_index += 4 ) {
             
-            current_char = *((unsigned int *)(skb->data + index));
+            // current_char = *((unsigned int *)(skb->data + index));
             // *(volatile unsigned int *)(vaddr + Page_index) = current_char;
-            *(unsigned int *)(vaddr + Page_index) = current_char;
+            // *(unsigned int *)(vaddr + Page_index) = current_char;
+
+            // *(unsigned int *)(vaddr + Page_index) = *((unsigned int *)(skb->data + index));
 
         }
 
         
         mb();  // Memory barrier before write
-        flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
+        // flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
         flush_dcache(vaddr, PAGE_SIZE);
         mb();  // Memory barrier after write
 
@@ -577,7 +579,7 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
         // printk(KERN_ERR "next page\n");
         pfn += 1;
     }
-    // printk(KERN_ERR "write success\n");
+    printk(KERN_ERR "write success\n");
     return 0;
 }
 
@@ -790,7 +792,7 @@ static int __init mytun_init(void)
     Read_thread=kthread_run(read_thread, NULL, "read_thread");
     Send_thread=kthread_run(send_thread, NULL, "send_thread");
     Intr_thread=kthread_run(intr_thread, NULL, "intr_thread");
-#if 0
+#if 1
     cpumask_t cpuset;
 
     // set every thread to different cpu
