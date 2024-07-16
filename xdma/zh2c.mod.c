@@ -47,7 +47,6 @@ __used __section(__versions) = {
 	{ 0xcbf3f793, "register_my_notifier" },
 	{ 0x5e5292c, "filp_close" },
 	{ 0xddd346a3, "filp_open" },
-	{ 0x56b1771b, "current_task" },
 	{ 0x4c9d28b0, "phys_base" },
 	{ 0x31e2d6ad, "dma_direct_unmap_sg" },
 	{ 0x20d8bf1e, "dma_direct_map_sg" },
@@ -87,4 +86,4 @@ __used __section(__versions) = {
 MODULE_INFO(depends, "xdma");
 
 
-MODULE_INFO(srcversion, "F5D943FD1A102ABA0F40D5C");
+MODULE_INFO(srcversion, "21791D3E474B169B940698B");

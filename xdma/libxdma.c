@@ -3712,7 +3712,7 @@ void flush_dcache(void *start, size_t size) {
 
 ssize_t my_xdma_xfer_submit(void *dev_hndl, int channel, u64 ep_addr,
                          struct sg_table *sgt, int timeout_ms) {
-#if 1
+#if 0
     mb(); // 保证所有写操作已经完成
 	#if 1 /*自己写缓存刷新函数*/
 		int i;

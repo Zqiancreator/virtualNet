@@ -3,7 +3,6 @@ if [ -f "Makefile2" ]; then
     mv "Makefile2" "Makefile"
 fi
 
-sudo rmmod  zh2c
 make
 sudo insmod zh2c.ko
 sudo ip addr add 192.168.24.12/24 brd 192.168.24.255 dev veth_net0

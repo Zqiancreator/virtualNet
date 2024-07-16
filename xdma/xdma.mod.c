@@ -63,7 +63,6 @@ __used __section(__versions) = {
 	{ 0x15ba50a6, "jiffies" },
 	{ 0xc5e4a5d1, "cpumask_next" },
 	{ 0xb31c1837, "kthread_bind" },
-	{ 0xc805f93, "clflush_cache_range" },
 	{ 0xd9a5ea54, "__init_waitqueue_head" },
 	{ 0xb44ad4b3, "_copy_to_user" },
 	{ 0x17de3d5, "nr_cpu_ids" },
@@ -217,4 +216,4 @@ MODULE_ALIAS("pci:v000010EEd00002808sv*sd*bc*sc*i*");
 MODULE_ALIAS("pci:v00001D0Fd0000F000sv*sd*bc*sc*i*");
 MODULE_ALIAS("pci:v00001D0Fd0000F001sv*sd*bc*sc*i*");
 
-MODULE_INFO(srcversion, "26AAD6CE8208226F6DF0D87");
+MODULE_INFO(srcversion, "6F7B0C8427BCA61F8C83C8C");

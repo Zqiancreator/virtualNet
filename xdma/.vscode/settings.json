@@ -5,6 +5,7 @@
         "kernel.h": "c",
         "wait.h": "c",
         "module.h": "c",
-        "zringbuffer.h": "c"
+        "zringbuffer.h": "c",
+        "znotify.h": "c"
     }
 }

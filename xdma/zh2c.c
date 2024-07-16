@@ -29,6 +29,7 @@
 #include <asm/page.h>
 #include "zringbuffer.h"
 #include <linux/cpumask.h>
+// #include "znotify.h"
 // #include "xdma_thread.h"
 // #include "libxdma.c"
 #ifdef __cplusplus
@@ -538,10 +539,10 @@ int pcie_init(void)
 int pcie_open(void)
 {
     int status = 0;
-    mm_segment_t old_fs;
+    // mm_segment_t old_fs;
 
-    old_fs = get_fs();
-    set_fs(KERNEL_DS);
+    // old_fs = get_fs();
+    // set_fs(KERNEL_DS);
 
     /* 打开 XDMA Host-to-Card 0 设备 */
     g_stpcidev.h2c0 = filp_open(g_stpcidev.h2c0_path, O_RDWR, S_IRUSR|S_IWUSR);
@@ -561,7 +562,7 @@ int pcie_open(void)
     g_stpcidev.h2c0->f_pos = H2C_OFFSET;
     g_stpcidev.c2h0->f_pos = C2H_OFFSET;
     /* 恢复原始的地址空间 */
-    set_fs(old_fs);
+    // set_fs(old_fs);
 
     return status;
 
@@ -570,7 +571,7 @@ cleanup_handles:
         filp_close(g_stpcidev.c2h0, NULL);
     if (!IS_ERR(g_stpcidev.h2c0) && g_stpcidev.h2c0)
         filp_close(g_stpcidev.h2c0, NULL);
-    set_fs(old_fs); // 确保在任何出口点恢复原始的地址空间
+    // set_fs(old_fs); // 确保在任何出口点恢复原始的地址空间
     return status;
 
 }
@@ -578,15 +579,15 @@ cleanup_handles:
 //关闭PCIe设备
 void pcie_close(void)
 {
-    mm_segment_t old_fs;
+    // mm_segment_t old_fs;
 
-    old_fs = get_fs();
-    set_fs(KERNEL_DS);
+    // old_fs = get_fs();
+    // set_fs(KERNEL_DS);
 	if (g_stpcidev.c2h0) filp_close(g_stpcidev.c2h0,NULL);
     if (g_stpcidev.h2c0) filp_close(g_stpcidev.h2c0,NULL);
     if (g_stpcidev.buffer_c2h) kfree(g_stpcidev.buffer_c2h);
     if (g_stpcidev.buffer_h2c) kfree(g_stpcidev.buffer_h2c);
-    set_fs(old_fs); // 确保在任何出口点恢复原始的地址空间
+    // set_fs(old_fs); // 确保在任何出口点恢复原始的地址空间
 }
 
 static int __init mytun_init(void)
