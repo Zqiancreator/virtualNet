@@ -1,1 +1,0 @@
-cmd_/home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/zh2c.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000 -z noexecstack   --build-id  -T ./scripts/module-common.lds -o /home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/zh2c.ko /home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/zh2c.o /home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/zh2c.mod.o;  true

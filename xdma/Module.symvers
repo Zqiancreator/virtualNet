@@ -1,5 +1,0 @@
-0xc9d9a678	intrFinish	/home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/xdma	EXPORT_SYMBOL	
-0xe6db25e6	my_xdma_xfer_submit	/home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/xdma	EXPORT_SYMBOL	
-0xcbf3f793	register_my_notifier	/home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/xdma	EXPORT_SYMBOL	
-0x21b694f5	unregister_my_notifier	/home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/xdma	EXPORT_SYMBOL	
-0xdd2ba8c5	xdma_xfer_submit	/home/npc/dma_ip_drivers/XDMA/linux-kernel/xdma/xdma	EXPORT_SYMBOL	
