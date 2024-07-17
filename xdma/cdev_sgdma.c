@@ -390,7 +390,7 @@ static ssize_t char_sgdma_read_write(struct file *file, const char __user *buf,
 	//debug
 	rv = virt_addr_valid(buf);
   if(rv){
-	printk(KERN_ERR "kernel virt_addr_valid\n");
+	// printk(KERN_ERR "kernel virt_addr_valid\n");
 	// printk(KERN_ERR "valid data :file:%x, count:%x, pos:%x\n",file,count,pos);
 	// 手动构建 SGL
 	struct scatterlist *sg;
@@ -421,7 +421,7 @@ static ssize_t char_sgdma_read_write(struct file *file, const char __user *buf,
 					   c2h_timeout * 1000);
 }
  else{// user
-	printk(KERN_ERR "user virt_addr not valid\n");
+	// printk(KERN_ERR "user virt_addr not valid\n");
 	// printk(KERN_ERR "not valid data :file:%x, count:%x, pos:%x\n",file,count,pos);
 	rv = char_sgdma_map_user_buf_to_sgl(&cb, write);
 	if (rv < 0)

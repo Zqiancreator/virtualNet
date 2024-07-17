@@ -59,7 +59,7 @@ extern "C" {
 #define PCI_VID                 0x10EE
 #define PCI_PID                 0x9034
 #define SGL_NUM                 2
-#define TIME_OUT                2000
+#define TIME_OUT                0
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH         6
 
@@ -144,7 +144,7 @@ extern int unregister_my_notifier(struct notifier_block *nb);
 // 通知处理函数
 static int my_notifier_call(struct notifier_block *nb, unsigned long action, void *data)
 {// 等待中断处理函数通知,然后唤醒读取ddr的线程
-    printk(KERN_ERR "debug: Notification received!, data:%s\n",(char*)data);
+    // printk(KERN_ERR "debug: Notification received!, data:%s\n",(char*)data);
     
     Intr_condition = 1;
     wake_up_interruptible(&my_wait_queue);
@@ -158,13 +158,13 @@ static struct notifier_block my_notifier_block = {
                        Local function implementations                         
 *******************************************************************************/
 static int mytun_open(struct net_device *dev) {
-    printk(KERN_ERR "open net dev\n");
+    // printk(KERN_ERR "open net dev\n");
     netif_start_queue(dev);
     return 0;
 }
 
 static int mytun_stop(struct net_device *dev) {
-    printk(KERN_ERR "stop net dev\n");
+    // printk(KERN_ERR "stop net dev\n");
     netif_stop_queue(dev);
     return 0;
 }
@@ -174,11 +174,11 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     // Transmit packet logic here
     struct iphdr *iph_xmit = (struct iphdr *)(skb_network_header(skb));
     if(iph_xmit->saddr==0&&iph_xmit->daddr!=0xd18a8c0&&iph_xmit->daddr!=0xc18a8c0){
-        printk(KERN_ERR "start xmit: error saddr=%x, daddr=%x\n",iph_xmit->saddr, iph_xmit->daddr);
+        // printk(KERN_ERR "start xmit: error saddr=%x, daddr=%x\n",iph_xmit->saddr, iph_xmit->daddr);
         return NETDEV_TX_OK;
     }
 
-    printk(KERN_ERR "debug: iph_xmit->daddr:0x%x, iph_xmit->saddr:0x%x,skb->len:%x,skb->protocol:%x\n",iph_xmit->daddr,iph_xmit->saddr,skb->len,skb->protocol);
+    // printk(KERN_ERR "debug: iph_xmit->daddr:0x%x, iph_xmit->saddr:0x%x,skb->len:%x,skb->protocol:%x\n",iph_xmit->daddr,iph_xmit->saddr,skb->len,skb->protocol);
 
     #if 0 /*debug 打印具体数据*/
         static bool flag = true;
@@ -192,13 +192,13 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     #endif
 
     if (skb_count[sgl_current] < MAX_SKBUFFS) { 
-        mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
         
         pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
         // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
         if (skb_count[sgl_current] == MAX_SKBUFFS) {
             mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数
-        }
+        }else
+            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
     } else {
         kfree_skb(skb);  // Drop the packet if the array is full
     }
@@ -209,7 +209,7 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
 static int mytun_set_mac_address(struct net_device *dev, void *p) {
     struct sockaddr *addr = p;
 
-    printk(KERN_INFO "Setting MAC address to %pM\n", addr->sa_data); // 举例输出
+    // printk(KERN_INFO "Setting MAC address to %pM\n", addr->sa_data); // 举例输出
     return eth_mac_addr(dev, p); // 或根据实际情况实现自定义逻辑
 }
 
@@ -317,15 +317,15 @@ static int Send_thread(void* data){// wait for condition and send data
         wait_event_interruptible(my_wait_queue, write_condition);
         write_condition = 0;
         if(skb_count[sgl_current]==0) { 
-            printk(KERN_ERR "send_thread: skb_count[sgl_current]=0\n"); 
+            // printk(KERN_ERR "send_thread: skb_count[sgl_current]=0\n"); 
             continue; 
         } 
-        printk(KERN_ERR "send thread ready to send skb count:%d\n",skb_count[sgl_current]);
+        // printk(KERN_ERR "send thread ready to send skb count:%d\n",skb_count[sgl_current]);
         sgl_current = 1 - sgl_current;// 设置current改变，现在就可以开始接收
 
         pci_send(xcdev,xdev,offst); 
 
-        printk(KERN_ERR "send end, offst=%x\n",offst);
+        // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
         offst += PACK_SIZE;
         if(offst>=RINGBUFFER_SIZE+H2C_OFFSET){
             offst = H2C_OFFSET;
@@ -334,7 +334,7 @@ static int Send_thread(void* data){// wait for condition and send data
         while (--skb_count[1-sgl_current]>=0) {
             kfree_skb(pstskb_array[1-sgl_current][skb_count[1-sgl_current]]);// TODO 是不是不用释放
         } 
-#if 1 /*debug 测试是否成功free*/
+#if 0 /*debug 测试是否成功free  TODO测试打印为not null*/
         if(pstskb_array[1-sgl_current][0]){ 
             printk(KERN_ERR "debug send_thread: pstskb_array[1-sgl_current][0] is not null\n");
         }else{
@@ -345,7 +345,7 @@ static int Send_thread(void* data){// wait for condition and send data
 
         ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);// send interrupt
         ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);// clear interrupt
-        printk(KERN_ERR "send inter success\n");
+        // printk(KERN_ERR "send inter success\n");
     }
     // never reach
     return 0;
@@ -365,13 +365,12 @@ static int Intr_thread(void* data){// 接收中断线程 移动ringbuffer的Writ
 
         ringbuffer->bWrIx+=1;            
         ringbuffer->bWrIx&=ringbuffer->bMax;            
-        printk(KERN_ERR "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
+        // printk(KERN_ERR "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
 
-        // ssleep(1);// todo 忽略一秒内处理两次中断
         ret = kernel_write(g_stpcidev.h2c0, msiData, 4, &msiReq);// clear msi interrupt
-        printk(KERN_ERR "debug Intr_thread: clear msi interrupt\n");
+        // printk(KERN_ERR "debug Intr_thread: clear msi interrupt\n");
         if(((ringbuffer->bRdIx+1)&ringbuffer->bMax)==ringbuffer->bWrIx){// TODO 
-            printk(KERN_ERR "debug Intr_thread: ringbuffer is empty wake up read\n");
+            // printk(KERN_ERR "debug Intr_thread: ringbuffer is empty wake up read\n");
             read_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
@@ -417,14 +416,15 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
 
                 ddr_skb->protocol = eth_type_trans(ddr_skb, mydev); // 设置协议为IP
                 ddr_skb->ip_summed = CHECKSUM_UNNECESSARY;
+#if 0
                 iph = (struct iphdr *)(skb_network_header(ddr_skb));
                 if(iph)
                     printk(KERN_ERR "Receive-thread Protocol:%d, len:%d, ipsaddr:%x, daddr:%x\n",iph->protocol, ddr_skb->len, iph->saddr, iph->daddr); 
                 else
                     printk(KERN_ERR "debug Receive-thread iph is null");
-
+#endif
                 if(ddr_skb){
-                    printk(KERN_ERR "debug Rx-thread ringbuffer->bRead:%x,ringbuffer->bWrIx:%x,offst=%llx,index=%d\n",ringbuffer->bRdIx,ringbuffer->bWrIx,offst,index);
+                    // printk(KERN_ERR "debug Rx-thread ringbuffer->bRead:%x,ringbuffer->bWrIx:%x,offst=%llx,index=%d\n",ringbuffer->bRdIx,ringbuffer->bWrIx,offst,index);
         
                     #if 0 /*debug 打印具体数据 和QT读取一样*/
                         int i=0;
@@ -438,8 +438,8 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
                         }
                     #endif
                     if (netif_rx(ddr_skb) == NET_RX_SUCCESS) {
-                        printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
-                        printk(KERN_ERR "netif_rx run success\n");
+                        // printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
+                        // printk(KERN_ERR "netif_rx run success\n");
                     }else{
                         kfree_skb(ddr_skb);
                         printk(KERN_ERR "Rx-thread netif_rx run error\n");
@@ -519,7 +519,7 @@ int pci_send(struct xdma_cdev *xcdev, struct xdma_dev *xdev, loff_t offst) {
     my_xdma_xfer_submit(xdev,0,offst,&sgt,0);
 
     pci_unmap_sg(pdev, sgt.sgl, sgt.orig_nents, DMA_TO_DEVICE);
-    printk(KERN_ERR "pci_send: xdma_xfer_submit, offst=%llx\n",offst);
+    // printk(KERN_ERR "pci_send: xdma_xfer_submit, offst=%llx\n",offst);
     // xdma_xfer_submit(xdev,0,1,offst,&sgt,1,10000); 
     return 0; 
 }

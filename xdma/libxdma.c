@@ -1419,7 +1419,7 @@ static irqreturn_t xdma_isr(int irq, void *dev_id)
 		u32 mask = 1;
 		int max = xdev->user_max;
 		send_notification();
-		printk(KERN_ERR "user user_irq=%x,times=%d,ch_irq=%x,user_max=%x\n",user_irq,times++,ch_irq,xdev->user_max);
+		// printk(KERN_ERR "user user_irq=%x,times=%d,ch_irq=%x,user_max=%x\n",user_irq,times++,ch_irq,xdev->user_max);
 		// user_interrupts_enable(xdev, user_irq);
 		isFinish = true;
 	xdev->irq_count++;
@@ -1437,7 +1437,7 @@ static irqreturn_t xdma_isr(int irq, void *dev_id)
 		int channel = 0;
 		int max = xdev->h2c_channel_max;
 
-	printk(KERN_ERR "h2c user_irq=%x,times=%d,ch_irq=%x,xdev->h2c_channel_max=%x\n",user_irq,times++,ch_irq,xdev->h2c_channel_max);
+	// printk(KERN_ERR "h2c user_irq=%x,times=%d,ch_irq=%x,xdev->h2c_channel_max=%x\n",user_irq,times++,ch_irq,xdev->h2c_channel_max);
 		/* iterate over H2C (PCIe read) */
 		for (channel = 0; channel < max && mask; channel++) {
 			struct xdma_engine *engine = &xdev->engine_h2c[channel];
@@ -1457,7 +1457,7 @@ static irqreturn_t xdma_isr(int irq, void *dev_id)
 		int channel = 0;
 		int max = xdev->c2h_channel_max;
 
-	printk(KERN_ERR "c2h user_irq=%x,times=%d,ch_irq=%x,xdev->c2h_channel_max=%x\n",user_irq,times++,ch_irq,xdev->c2h_channel_max);
+	// printk(KERN_ERR "c2h user_irq=%x,times=%d,ch_irq=%x,xdev->c2h_channel_max=%x\n",user_irq,times++,ch_irq,xdev->c2h_channel_max);
 		/* iterate over C2H (PCIe write) */
 		for (channel = 0; channel < max && mask; channel++) {
 			struct xdma_engine *engine = &xdev->engine_c2h[channel];
@@ -1485,7 +1485,7 @@ static irqreturn_t xdma_user_irq(int irq, void *dev_id)
 {
 	struct xdma_user_irq *user_irq;
 
-	printk(KERN_ERR "(irq=%d) <<<< INTERRUPT SERVICE ROUTINE\n", irq);
+	// printk(KERN_ERR "(irq=%d) <<<< INTERRUPT SERVICE ROUTINE\n", irq);
 
 	if (!dev_id) {
 		pr_err("Invalid dev_id on irq line %d\n", irq);
@@ -1507,7 +1507,7 @@ static irqreturn_t xdma_channel_irq(int irq, void *dev_id)
 	struct xdma_engine *engine;
 	struct interrupt_regs *irq_regs;
 
-	printk(KERN_ERR "(irq=%d) <<<< INTERRUPT service ROUTINE\n", irq);
+	// printk(KERN_ERR "(irq=%d) <<<< INTERRUPT service ROUTINE\n", irq);
 	if (!dev_id) {
 		pr_err("Invalid dev_id on irq line %d\n", irq);
 		return IRQ_NONE;
@@ -3822,7 +3822,7 @@ ssize_t my_xdma_xfer_submit(void *dev_hndl, int channel, u64 ep_addr,
 	// pr_err("debug: destory success.\n");
     mutex_unlock(&engine->desc_lock);
 
-	pr_err("debug: ready free.\n");
+	// pr_err("debug: ready free.\n");
     xdma_request_free(req);
     return done ? done : rv;
 }
