@@ -74,7 +74,7 @@ extern "C" {
 #define MAC_OFFSET              0 // 14
 #define RING_BUFF_DEPTH         6           // ringbuff中含有1<<RING_BUFF_DEPTH 个PACKAGE
 #define QUEUE_SIZE              100
-#define TIME_OUT                2000
+#define TIME_OUT                0
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define READ_ALIGN              8
 /*******************************************************************************
@@ -124,9 +124,15 @@ unsigned int sendNum = 0;
     ktime_t start, end;
     ktime_t start2, end2;
     ktime_t start3, end3;
+    ktime_t start4, end4;
+    ktime_t start5, end5;
+    ktime_t start6, end6;
     s64 delta;
     s64 delta2;
     s64 delta3;
+    s64 delta4;
+    s64 delta5;
+    s64 delta6;
 #endif
 
 /* Assuming PCIe device */
@@ -155,9 +161,13 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
     static int my_notifier_call(struct notifier_block *nb, unsigned long action, void *data)
     {// 等待中断处理函数通知(此时RingBuffer已经为空),然后唤醒读取ddr的线程
         start = ktime_get();
-        printk(KERN_ERR "Notification received success!, data:%s\n",(char*)data);
-        read_condition = 1;
-        wake_up_interruptible(&my_wait_queue);
+        // printk(KERN_ERR "Notification received success!, data:%s\n",(char*)data);
+        if(read_condition == 0){
+            read_condition = 1;
+            wake_up_interruptible(&my_wait_queue);
+        }else{
+            printk(KERN_ERR "error notify too fast\n");
+        }
         return NOTIFY_OK;
     }
 
@@ -176,7 +186,7 @@ static void Timer_Callback(struct timer_list *timer){// 发送中断操作不能
         wake_up_interruptible(&my_wait_queue);// 唤醒发送中断线程
         if(sendNum != MAX_SKBUFFS){
             send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
-            printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
+            // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
         }
         sendNum = 0;
         return ;
@@ -193,7 +203,7 @@ static int intr_thread(void *data){
         // ssleep(1);
         // RWreg(MSI_INTERRUPT, 0x0000, 0);        // read msi interrupt 
         // RWreg(CLEAR_INTR, 0, 0);        // clear intr
-        printk(KERN_ERR "send msi interrupt\n");
+        // printk(KERN_ERR "send msi interrupt\n");
 
     }     
 }
@@ -208,7 +218,7 @@ static int send_thread(void *data){// write to ddr and send interrupt
         send_condition=0;
         // 处理发送队列中的数据包
         while (tx_queue_head != tx_queue_tail) {
-            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms)); // 开启、重置定时器
+            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(1)); // TODO 留1ms来写入ddr
             skb = tx_queue[tx_queue_head];
             if(!skb){
                 printk(KERN_ERR "error skb is null, tx queue head=%d\n",tx_queue_head);
@@ -224,13 +234,18 @@ static int send_thread(void *data){// write to ddr and send interrupt
             start3 = ktime_get();
             // 实际发送数据包 发送一个包
             write_ddr(skb, send_thread_offst, MTU_SIZE);
+            
+#if 0
             end3 = ktime_get();
             delta3 = ktime_to_ns(ktime_sub(end3, start3));
+            delta4 = ktime_to_ns(ktime_sub(end4, start4));
             printk(KERN_INFO "write MTU took %lld ns to execute.\n", delta3);
+            printk(KERN_INFO "inside write MTU took %lld ns to execute.\n", delta4);
+#endif
             // 更新环形缓冲区的读写索引 允许上层继续调用 start_xmit
             tx_queue_head = (tx_queue_head + 1) % QUEUE_SIZE;
             if (netif_queue_stopped(mydev)){
-                printk(KERN_ERR "wake up dev, start send\n");
+                // printk(KERN_ERR "wake up dev, start send\n");
                 netif_wake_queue(mydev);// TODO wake up dev 待验证
             }
             
@@ -240,8 +255,9 @@ static int send_thread(void *data){// write to ddr and send interrupt
 
             if(++sendNum == MAX_SKBUFFS){
                 mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数发送中断
-            }
-            // 释放 skb
+            }else
+                mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms)); // 设置下一个包到来的超时时间
+
             dev_kfree_skb(skb);
         }
         
@@ -261,20 +277,32 @@ static int read_thread(void *data)
     }
 
     while(1){
+#if 0
+        start6 = ktime_get();
+        printk(KERN_ERR "read_thread once took %lld ns to execute\n", delta5);
+        end6 = ktime_get();
+        delta6 = ktime_to_ns(ktime_sub(end6, start6));
+        printk(KERN_ERR "one printk took %lld ns to execute\n", delta6);
+        start5 = ktime_get();
+#endif
         wait_event_interruptible(my_wait_queue, read_condition);
-        read_condition = 0;
-
         while(ringbuffer->bRdIx!=ringbuffer->bWrIx){
-            printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
+            // printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
             if(read_ddr(read_offset, PACK_SIZE) == -1){
                 printk(KERN_ERR "read_thread: read ddr error\n");
                 break; 
             }
-            printk(KERN_ERR "read_offset=%x, RINGBUFFER_SIZE=%x\n",read_offset, RINGBUFFER_SIZE);
+            // printk(KERN_ERR "read_offset=%x, RINGBUFFER_SIZE=%x\n",read_offset, RINGBUFFER_SIZE);
             read_offset = (read_offset+PACK_SIZE)%(RINGBUFFER_SIZE);
             ringbuffer->bRdIx += 1;
             ringbuffer->bRdIx &= ringbuffer->bMax;
         }
+#if 0
+        end5 = ktime_get();
+        delta5 = ktime_to_ns(ktime_sub(end5, start5));
+#endif
+
+        read_condition = 0;
     }
     // never reach
     return 0;
@@ -336,14 +364,14 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
         }
         else{
             printk(KERN_ERR " iph is null or saddr is 0\n");
-            if(iph)
-                printk(KERN_ERR "xmit iph->daddr=%x,skb->protocol=%x,iph->protocol=%x\n",iph->daddr,skb->protocol,iph->protocol);
+            // if(iph)
+            //     printk(KERN_ERR "xmit iph->daddr=%x,skb->protocol=%x,iph->protocol=%x\n",iph->daddr,skb->protocol,iph->protocol);
             return NETDEV_TX_OK;
         }
 
-    end2 = ktime_get();
-    delta2 = ktime_to_ns(ktime_sub(end2, start2));
-    printk(KERN_INFO "net process pack and reply took %lld ns to execute.\n", delta2);
+    // end2 = ktime_get();
+    // delta2 = ktime_to_ns(ktime_sub(end2, start2));
+    // printk(KERN_INFO "net process pack and reply took %lld ns to execute.\n", delta2);
 
     // 将数据包添加到发送队列 TODO 判满
     tx_queue[tx_queue_tail] = skb;
@@ -370,7 +398,7 @@ static int mytun_set_mac_address(struct net_device *dev, void *p) {
     struct sockaddr *addr = p;
     // 在这里编写实际改变 MAC 地址的代码
     // ...
-    printk(KERN_INFO "Setting MAC address to %pM\n", addr->sa_data); // 举例输出
+    // printk(KERN_INFO "Setting MAC address to %pM\n", addr->sa_data); // 举例输出
     return eth_mac_addr(dev, p); // 或根据实际情况实现自定义逻辑
 }
 
@@ -511,6 +539,7 @@ void invalidate_cache(void *start, size_t size) {
 
 static int write_ddr(struct sk_buff *skb,int offst,int write_size){
     // write one skb data,假设现在每次写的数量不超过一页，1500<4096 即 write_size < PAGE_SIZE
+    start4 = ktime_get();
     uint32_t current_char;
     unsigned int Page_index = 0;
     int ret = 0;
@@ -525,10 +554,11 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
     write_size += Page_index;
     currentSize = write_size > PAGE_SIZE? write_size - PAGE_SIZE:0;
     int testPageIndex =Page_index;
-
-    // iph = (struct iphdr *)(skb_network_header(skb));
-    // printk(KERN_ERR "debug write ddr Protocol:%d, len:%d, ipsaddr:%x, daddr:%x,offst=%x\n",iph->protocol, skb->len, iph->saddr, iph->daddr,offst);
-    // printk(KERN_ERR "debug write ddr pfn:%d, PageIndex:%d, writeSize:%x, currentSize:%x,offst=%x\n",pfn, Page_index, write_size, currentSize,offst);
+#if 0
+    iph = (struct iphdr *)(skb_network_header(skb));
+    printk(KERN_ERR "debug write ddr Protocol:%d, len:%d, ipsaddr:%x, daddr:%x,offst=%x\n",iph->protocol, skb->len, iph->saddr, iph->daddr,offst);
+    printk(KERN_ERR "debug write ddr pfn:%d, PageIndex:%d, writeSize:%x, currentSize:%x,offst=%x\n",pfn, Page_index, write_size, currentSize,offst);
+#endif
     while (write_size > 0) {
         page = pfn_to_page(pfn);
         if (!page) {
@@ -545,12 +575,11 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
 
         // 访问内存
         for (; Page_index < write_size && Page_index < PAGE_SIZE; index += 4, Page_index += 4 ) {
-            
             // current_char = *((unsigned int *)(skb->data + index));
             // *(volatile unsigned int *)(vaddr + Page_index) = current_char;
             // *(unsigned int *)(vaddr + Page_index) = current_char;
 
-            // *(unsigned int *)(vaddr + Page_index) = *((unsigned int *)(skb->data + index));
+            *(unsigned int *)(vaddr + Page_index) = *((unsigned int *)(skb->data + index));
 
         }
 
@@ -559,7 +588,6 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
         // flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
         flush_dcache(vaddr, PAGE_SIZE);
         mb();  // Memory barrier after write
-
         // 取消映射页
         kunmap(page);
 
@@ -576,14 +604,15 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
             printk(KERN_ERR "ERROR Page_index = 0x%x,write_size=%x\n",Page_index,write_size);
             break;
         }
-        // printk(KERN_ERR "next page\n");
         pfn += 1;
+        // printk(KERN_ERR "next page\n");
     }
-    printk(KERN_ERR "write success\n");
+    // printk(KERN_ERR "write success\n");
+    end4 = ktime_get();
     return 0;
 }
 
-static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE
+static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE   TODO offset,read_size 类型
     uint64_t current_char;
     unsigned int index=0;
     unsigned int Page_index;
@@ -596,7 +625,7 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE
     pfn = (READ_BASE+offst) >> PAGE_SHIFT;
     Page_index = offst % PAGE_SIZE;
     currentSize = PAGE_SIZE - Page_index; // 当前这页可以读取的数据
-    printk(KERN_ERR "read ddr, offst=%x, read_size=%x,currentSize=%x\n",offst, read_size, currentSize);
+    // printk(KERN_ERR "read ddr, offst=%x, read_size=%x,currentSize=%x\n",offst, read_size, currentSize);
 
     // configSKB(false); 
     #if 1
@@ -631,8 +660,9 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE
                     printk(KERN_ERR "error vaddr=%p\n",vaddr);
                 asm volatile ("ldxr %0, [%1]" : "=&r" (current_char) : "r" (vaddr + Page_index)); 
             #endif
-            current_char = *(volatile uint64_t *)(vaddr + Page_index);
-            *((uint64_t *)(skb_data + index)) = current_char;
+            // current_char = *(volatile uint64_t *)(vaddr + Page_index);
+            // *((uint64_t *)(skb_data + index)) = current_char;
+            *((uint64_t *)(skb_data + index)) = *(volatile uint64_t *)(vaddr + Page_index);
             if(index == MTU_SIZE-READ_ALIGN){// 读取到一个完整skb,发回上层 
             asm volatile ("dsb ish" : : : "memory"); 
                 // printk(KERN_ERR "read ddr send skb, index=%x,TotalSize=%x,ddr_skb->len=%x\n",index,TotalSize,ddr_skb->len);
@@ -653,13 +683,14 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE
                                 }
                             }
                         #endif
+#if 0
                         if(iph->daddr==0xd18a8c0)
                             start2 = ktime_get();
                         end = ktime_get();
                         delta = ktime_to_ns(ktime_sub(end, start));
                         printk(KERN_INFO "read MTU and netif_rx took %lld ns to execute.\n", delta);
-                        printk(KERN_ERR "debug read_ddr recv package: iph->saddr=%x,iph->daddr=%x,skb->protocol=%x,iph->protocol=%x\n",iph->saddr,iph->daddr,ddr_skb->protocol,iph->protocol);
-                        printk(KERN_ERR "read ddr netif_rx run success, Value at address: 0x%lx\n",READ_BASE + offst + TotalSize + READ_ALIGN - MTU_SIZE );
+#endif
+                        // printk(KERN_ERR "read ddr netif_rx run success: iph->saddr=%x,iph->daddr=%x,skb->protocol=%x,iph->protocol=%x, Value at address: 0x%lx\n",iph->saddr,iph->daddr,ddr_skb->protocol,iph->protocol, READ_BASE + offst + TotalSize + READ_ALIGN - MTU_SIZE);
                     }else
                         printk(KERN_ERR "read ddr netif_rx run error\n");
                 }
@@ -735,23 +766,23 @@ static int __init mytun_init(void)
     stifrtest.ifr_flags = IFF_UP;
     memcpy(stifrtest.ifr_hwaddr.sa_data, fpga_mac_src, ETH_ALEN);
     stifrtest.ifr_hwaddr.sa_family = ARPHRD_ETHER;
-    printk(KERN_ERR "sa_family: %d\n", stifrtest.ifr_hwaddr.sa_family);
+    // printk(KERN_ERR "sa_family: %d\n", stifrtest.ifr_hwaddr.sa_family);
 
-    printk(KERN_ERR "before register_net\n"); 
+    // printk(KERN_ERR "before register_net\n"); 
     err = register_netdev(g_stmytundev);
     if (err) 
 	{
         return err;
     }
 
-    printk(KERN_ERR "register_net, err:%x\n", err);
+    // printk(KERN_ERR "register_net, err:%x\n", err);
     rtnl_lock();
     if (dev_change_flags(g_stmytundev, IFF_UP, NULL) < 0) 
 	{
         free_netdev(g_stmytundev);
         return err;
     }
-    printk(KERN_ERR "change_flag\n");
+    // printk(KERN_ERR "change_flag\n");
 
     if (netif_running(g_stmytundev)){
         netif_stop_queue(g_stmytundev);
@@ -769,7 +800,7 @@ static int __init mytun_init(void)
     netif_start_queue(g_stmytundev);
     rtnl_unlock();
 
-    printk(KERN_ERR "set_mac_addr\n" );
+    // printk(KERN_ERR "set_mac_addr\n" );
     /* Set IP address and netmask */
     struct in_device *in_dev = __in_dev_get_rtnl(g_stmytundev);
     if (!in_dev) 
@@ -779,9 +810,9 @@ static int __init mytun_init(void)
         free_netdev(g_stmytundev);
         return err;
     }
-    printk(KERN_ERR "init in_dev\n" );
+    // printk(KERN_ERR "init in_dev\n" );
 
-    printk(KERN_ERR "TUN device created: %s\n", MHYTUN_DEV_NAME);
+    // printk(KERN_ERR "TUN device created: %s\n", MHYTUN_DEV_NAME);
     
     /* 初始化 packet_type 结构体 */
     memset(&pci_packet_type, 0, sizeof(struct packet_type));
