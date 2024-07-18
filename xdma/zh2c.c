@@ -96,6 +96,22 @@ loff_t intrPos=0x82000040;
 loff_t msiTest=0x82000070;
 loff_t msiReq= 0x82000068;
 struct net_device * mydev;
+
+#if 1 /*计时每阶段耗时*/
+    ktime_t start, end;
+    ktime_t start2, end2;
+    ktime_t start3, end3;
+    ktime_t start4, end4;
+    ktime_t start5, end5;
+    ktime_t start6, end6;
+    s64 delta;
+    s64 delta2;
+    s64 delta3;
+    s64 delta4;
+    s64 delta5;
+    s64 delta6;
+#endif
+
 /*******************************************************************************
                          	  Local function declarations                          
  ******************************************************************************/
@@ -194,12 +210,22 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     if (skb_count[sgl_current] < MAX_SKBUFFS) { 
         
         pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
-        // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
+#if 0
+        printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
         if (skb_count[sgl_current] == MAX_SKBUFFS) {
             mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数
         }else
             mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
+#endif
+        if(skb_count[1-sgl_current]==0){// 上一个数据包已经发送完成 TODO
+            write_condition = 1;
+            wake_up_interruptible(&my_wait_queue);
+        }
+        else{
+            printk(KERN_ERR "skb_count[1-sgl_current]=%d\n",skb_count[1-sgl_current]);
+        }
     } else {
+        printk(KERN_ERR "error skb array is full, drop it\n");
         kfree_skb(skb);  // Drop the packet if the array is full
     }
     // dev_kfree_skb(skb);
@@ -407,7 +433,6 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
                 skb_data = skb_put(ddr_skb, MTU_SIZE);
                 ddr_skb->dev = mydev;
                 // configSKB(ddr_skb, skb_data, false);
-
                 ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0,skb_data,MTU_SIZE,&offst); 
 
                 // configSKB(ddr_skb, skb_data, true);
@@ -732,7 +757,7 @@ static int __init mytun_init(void)
     } 
 
 
-#if 0
+#if 1
     cpumask_t cpuset;
 
     // set every thread to different cpu
