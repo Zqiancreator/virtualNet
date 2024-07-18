@@ -98,7 +98,7 @@ static void send_notification(void);
 		/* If fifo is empty, notify c2h device*/    
 		if (((psFifo->bRdIx + 1) & psFifo->bMax) == psFifo->bWrIx)    
 		{        
-			printk(KERN_ERR "%x, %x\n", psFifo->bRdIx, psFifo->bWrIx);
+			printk(KERN_ERR "%x %x\n", psFifo->bRdIx, psFifo->bWrIx);
 			// for(delay =0;delay<10000;delay++){};
 			send_notification();
 		}   

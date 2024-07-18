@@ -218,7 +218,7 @@ static int send_thread(void *data){// write to ddr and send interrupt
         send_condition=0;
         // 处理发送队列中的数据包
         while (tx_queue_head != tx_queue_tail) {
-            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(1)); // TODO 留1ms来写入ddr
+            // mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(1)); // TODO 留1ms来写入ddr
             skb = tx_queue[tx_queue_head];
             if(!skb){
                 printk(KERN_ERR "error skb is null, tx queue head=%d\n",tx_queue_head);
@@ -231,33 +231,30 @@ static int send_thread(void *data){// write to ddr and send interrupt
                     printk(KERN_ERR "%x,",skb->data[i]);
                 }
             #endif
-            start3 = ktime_get();
             // 实际发送数据包 发送一个包
             write_ddr(skb, send_thread_offst, MTU_SIZE);
             
-#if 0
-            end3 = ktime_get();
-            delta3 = ktime_to_ns(ktime_sub(end3, start3));
-            delta4 = ktime_to_ns(ktime_sub(end4, start4));
-            printk(KERN_INFO "write MTU took %lld ns to execute.\n", delta3);
-            printk(KERN_INFO "inside write MTU took %lld ns to execute.\n", delta4);
-#endif
             // 更新环形缓冲区的读写索引 允许上层继续调用 start_xmit
             tx_queue_head = (tx_queue_head + 1) % QUEUE_SIZE;
+#if 0
             if (netif_queue_stopped(mydev)){
                 // printk(KERN_ERR "wake up dev, start send\n");
                 netif_wake_queue(mydev);// TODO wake up dev 待验证
             }
-            
-            // printk(KERN_ERR "send thread send skb, send_thread_offst=%x,tx_queue_head=%x\n",send_thread_offst,tx_queue_head);
+#endif            
+            sendNum ++;
             send_thread_offst = (send_thread_offst+MTU_SIZE)%RINGBUFFER_SIZE;
-            // printk(KERN_ERR "after change send_thread_offst, send_thread_offst=%x,tx_queue_head=%x\n",send_thread_offst,tx_queue_head);
-
+            if(sendNum != MAX_SKBUFFS){
+                send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
+            }
+            sendNum = 0;
+            RWreg(MSI_INTERRUPT, 0x01, 1);        // send msi interrupt
+#if 0
             if(++sendNum == MAX_SKBUFFS){
                 mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数发送中断
             }else
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms)); // 设置下一个包到来的超时时间
-
+#endif
             dev_kfree_skb(skb);
         }
         
@@ -277,14 +274,7 @@ static int read_thread(void *data)
     }
 
     while(1){
-#if 0
-        start6 = ktime_get();
-        printk(KERN_ERR "read_thread once took %lld ns to execute\n", delta5);
-        end6 = ktime_get();
-        delta6 = ktime_to_ns(ktime_sub(end6, start6));
-        printk(KERN_ERR "one printk took %lld ns to execute\n", delta6);
-        start5 = ktime_get();
-#endif
+
         wait_event_interruptible(my_wait_queue, read_condition);
         while(ringbuffer->bRdIx!=ringbuffer->bWrIx){
             // printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
@@ -297,10 +287,6 @@ static int read_thread(void *data)
             ringbuffer->bRdIx += 1;
             ringbuffer->bRdIx &= ringbuffer->bMax;
         }
-#if 0
-        end5 = ktime_get();
-        delta5 = ktime_to_ns(ktime_sub(end5, start5));
-#endif
 
         read_condition = 0;
     }
@@ -341,37 +327,15 @@ static int mytun_stop(struct net_device *dev) {
 
 static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev) {// 收到上层发送请求唤醒sendthread去写ddr和发中断
     // Transmit packet logic here
-        struct iphdr *  iph = (struct iphdr *)skb_network_header(skb);
-        #if 0
-        if(iph->daddr==0xff18a8c0)// 忽略广播包
-            return NETDEV_TX_OK;
-        if(skb->protocol==0xdd86)// 忽略ipv6包
-            return NETDEV_TX_OK;
-        #endif
-        if(iph&&iph->saddr!=0){
-            #if 0 /*debug 打印具体数据*/
-                static bool flag = true;
-                if(flag){
-                    int i=0;
-                    flag=false;
-                    printk(KERN_ERR "begin print data,skb->len=%x\n",skb->len);
-                    for(i=0;i<skb->len;i++){
-                        printk(KERN_ERR "%x,",skb->data[i]);
-                    }
-                }
-            #endif
-            // printk(KERN_ERR "debug ready xmit: iph->saddr=%x,iph->daddr=%x,skb->protocol=%x,iph->protocol=%x\n",iph->saddr,iph->daddr,skb->protocol,iph->protocol);
-        }
-        else{
-            printk(KERN_ERR " iph is null or saddr is 0\n");
-            // if(iph)
-            //     printk(KERN_ERR "xmit iph->daddr=%x,skb->protocol=%x,iph->protocol=%x\n",iph->daddr,skb->protocol,iph->protocol);
-            return NETDEV_TX_OK;
-        }
+    struct iphdr *  iph = (struct iphdr *)skb_network_header(skb);
+        
+    if(iph==NULL||iph->saddr==0){
+        printk(KERN_ERR " iph is null or saddr is 0\n");
+        // if(iph)
+        //     printk(KERN_ERR "xmit iph->daddr=%x,skb->protocol=%x,iph->protocol=%x\n",iph->daddr,skb->protocol,iph->protocol);
+        return NETDEV_TX_OK;
+    }
 
-    // end2 = ktime_get();
-    // delta2 = ktime_to_ns(ktime_sub(end2, start2));
-    // printk(KERN_INFO "net process pack and reply took %lld ns to execute.\n", delta2);
 
     // 将数据包添加到发送队列 TODO 判满
     tx_queue[tx_queue_tail] = skb;
@@ -380,7 +344,7 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
     send_condition = 1;
     wake_up_interruptible(&my_wait_queue);// 唤醒实际发送线程
-
+#if 0
     // 检查发送队列是否已满
     if (tx_queue_tail  == tx_queue_head) {
         // 停止发送队列，防止上层继续调用 start_xmit
@@ -388,10 +352,10 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
         netif_stop_queue(dev);
         return NETDEV_TX_BUSY;// 让上层暂停调用
     }
+#endif
     // 返回 NETDEV_TX_OK 表示数据包已成功发送或已被处理
     return NETDEV_TX_OK;
 
-    return NET_RX_DROP;
 }
 
 static int mytun_set_mac_address(struct net_device *dev, void *p) {
