@@ -62,7 +62,9 @@ extern "C" {
 #define TIME_OUT                0
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH         6
-
+#define WRITE_RING_DEPTH        6
+#define WriteRingSize           100
+#define FREE_SKB_MAX            100
 /*******************************************************************************
                               Type definitions                                
  ******************************************************************************/
@@ -74,6 +76,8 @@ static struct packet_type pci_packet_type;
 int skb_count[SGL_NUM];      // skb num now
 struct sk_buff 					*pstskb_array[SGL_NUM][MAX_SKBUFFS];
 struct scatterlist *sgl[SGL_NUM];
+
+
 struct sg_table sgt;
 int sgl_current;    
 struct pci_dev *pdev;
@@ -96,6 +100,7 @@ loff_t intrPos=0x82000040;
 loff_t msiTest=0x82000070;
 loff_t msiReq= 0x82000068;
 struct net_device * mydev;
+static bool start_xmit_first = true;
 
 #if 1 /*计时每阶段耗时*/
     ktime_t start, end;
@@ -151,6 +156,36 @@ extern ssize_t xdma_xfer_submit(void *dev_hndl, int channel, bool write, u64 ep_
     } xdma_device;
     /* Assuming PCIe device */
     xdma_device g_stpcidev;
+
+    typedef struct skb_node {
+        struct sk_buff *skb;
+        struct skb_node *next;
+    }skb_node;
+
+    // 链表头结构
+    typedef struct skb_list {
+        int count;
+        struct skb_node *head;
+    }skb_list;
+
+skb_list *skb_head;
+typedef struct Store_skb_list 
+{
+    skb_list *ringbuffer[FREE_SKB_MAX];
+    u_int16_t Free;
+    u_int16_t Used;
+    u_int16_t count;
+}FreeSkbList;
+
+typedef struct WriteRingbuffer
+{
+    /* data */
+    skb_list *ringbuffer[WriteRingSize];
+    u_int16_t WrInx;
+    u_int16_t RdInx;
+}WriteRingbuffer;
+WriteRingbuffer* writeRingbuffer;
+FreeSkbList* freeSkbList;
 /*******************************************************************************
                        Inline function implementations                        
 *******************************************************************************/
@@ -189,6 +224,8 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     // 收到包后重置定时器，数量达到MAX则调用Callback，和超时处理一样
     // Transmit packet logic here
     struct iphdr *iph_xmit = (struct iphdr *)(skb_network_header(skb));
+    skb_node * tmp;
+    static bool UseFree = false;
     if(iph_xmit->saddr==0&&iph_xmit->daddr!=0xd18a8c0&&iph_xmit->daddr!=0xc18a8c0){
         // printk(KERN_ERR "start xmit: error saddr=%x, daddr=%x\n",iph_xmit->saddr, iph_xmit->daddr);
         return NETDEV_TX_OK;
@@ -207,27 +244,39 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
         }
     #endif
 
-    if (skb_count[sgl_current] < MAX_SKBUFFS) { 
-        
-        pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
-#if 0
-        printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
-        if (skb_count[sgl_current] == MAX_SKBUFFS) {
-            mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数
-        }else
-            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
-#endif
-        if(skb_count[1-sgl_current]==0){// 上一个数据包已经发送完成 TODO
-            write_condition = 1;
-            wake_up_interruptible(&my_wait_queue);
+    if(start_xmit_first){
+        if(skb_head != NULL){
+            printk(KERN_ERR "error last skb is not put in ringbuffer\n");
+        }
+        if(freeSkbList->count > 0){
+            skb_head = freeSkbList->ringbuffer[freeSkbList->Used++];
+            freeSkbList->Used %= FREE_SKB_MAX;
+            freeSkbList->count--;
+            UseFree = true;
         }
         else{
-            printk(KERN_ERR "skb_count[1-sgl_current]=%d\n",skb_count[1-sgl_current]);
+            skb_head = (skb_list *)kmalloc(sizeof(skb_list), GFP_KERNEL);
+            skb_head->head = (skb_node *)kmalloc(sizeof(skb_node), GFP_KERNEL);
+            UseFree = false;
         }
-    } else {
-        printk(KERN_ERR "error skb array is full, drop it\n");
-        kfree_skb(skb);  // Drop the packet if the array is full
+        skb_head->head->skb = skb;
+        skb_head->count = 1;
+        tmp = skb_head->head;
+        start_xmit_first = false;
+    } else { 
+        if(!UseFree){
+            tmp->next = (skb_node *)kmalloc(sizeof(skb_node), GFP_KERNEL);
+        }
+
+        tmp = tmp->next;
+        tmp->skb = skb; 
+        skb_head->count++;
     }
+    if (skb_head->count == MAX_SKBUFFS) {
+        mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数
+    } else
+        mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
+
     // dev_kfree_skb(skb);
     return NETDEV_TX_OK;
 }
@@ -253,72 +302,6 @@ static int mytun_rx_handler(
     struct packet_type 				*pstpt, 
     struct net_device 				*pstorigdev)
 {// 接收到数据包直接发回上层
-#if 0
-    struct iphdr *iph = (struct iphdr *)(skb_network_header(pstskb));
-    
-    if(iph->daddr!= DEST_HOST_IP&&iph->daddr!=DEST_CARD_IP&&iph->daddr!=BOARD_IP){
-        // printk(KERN_ERR "error daddr=%x\n",iph->daddr);
-        return NET_RX_SUCCESS;
-    }
-    if(iph->saddr == DEST_CARD_IP){
-        printk(KERN_ERR "recv from card: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol);
-    }
-    else
-    printk(KERN_ERR "recv : iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,pstskb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,pstskb->protocol);
-
-    #if 1 /*手动回复ping包*/
-    #define PACKET_DATA_SIZE 100
-    static bool flag = true;
-    if(!flag)
-        return NET_RX_SUCCESS;
-    flag = false;
-    static uint8_t packet_data[PACKET_DATA_SIZE] = {
-        0x02, 0x11, 0x22, 0x33, 0x44, 0x55, 0x02, 0x11, 0x22, 0x33, 0x44, 0x56, 0x08, 0x00, 0x45, 0x00, 
-        0x00, 0x54, 0x98, 0xc0, 0x40, 0x00, 0x40, 0x01, 0xf0, 0x7e, 0xc0, 0xa8, 0x18, 0x0d, 0xc0, 0xa8, 
-        0x18, 0x0c, 0x08, 0x00, 0x20, 0x83, 0x3a, 0x03, 0x00, 0x00, 0x21, 0x75, 0x7c, 0x04, 0x00, 0x00, 
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,0x00, 0x00, 
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00, 0x00,0x00, 0x00, 0x00            
-    };
-    struct sk_buff *debug_skb;
-    static struct net_device *netdev;
-    // Allocate a new socket buffer
-    debug_skb = dev_alloc_skb(PACKET_DATA_SIZE);
-    if (!debug_skb) {
-        printk(KERN_ERR "Failed to allocate skb\n");
-        return -ENOMEM;
-    }
-    skb_reserve(debug_skb, NET_IP_ALIGN);
-    // Set the network device to lo (loopback) for testing
-    netdev = dev_get_by_name(&init_net, MHYTUN_DEV_NAME);
-    if (!netdev) {
-        printk(KERN_ERR "Failed to get network device\n");
-        kfree_skb(debug_skb);
-        return -ENODEV;
-    }
-
-    debug_skb->dev = netdev;
-
-    // Fill the skb with the packet data
-    skb_put_data(debug_skb, packet_data, PACKET_DATA_SIZE);
-    printk(KERN_ERR "debug skb->len:%x,skb->data[0]:%x,skb->data[45]:%x\n",debug_skb->len,debug_skb->data[0],debug_skb->data[45]);
-    skb_set_network_header(debug_skb, sizeof(struct ethhdr));
-    skb_set_transport_header(debug_skb, sizeof(struct ethhdr) + sizeof(struct iphdr));
-    iph = (struct iphdr *)(skb_network_header(debug_skb));
-    
-    // Set the protocol
-    debug_skb->protocol = eth_type_trans(debug_skb, netdev);// 会改变skb->len  htons(ETH_P_IP); // 设置协议为IP,不改变length 
-    debug_skb->ip_summed = CHECKSUM_UNNECESSARY;
-    // Send the packet to the upper layers
-    if (netif_rx(debug_skb) == NET_RX_SUCCESS) {
-        printk(KERN_ERR "debug netif_rx package : iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,debug_skb->protocol=%x,debug_skb->len:%x\n",iph->saddr,iph->daddr,iph->protocol,debug_skb->protocol,debug_skb->len);
-        return 0;
-    }else{
-        kfree_skb(debug_skb);
-        printk(KERN_ERR "netif_rx run error\n");
-    }
-    #endif
-#endif    
     return NET_RX_SUCCESS;
 }
 
@@ -326,6 +309,10 @@ static int Send_thread(void* data){// wait for condition and send data
     int ret;
     loff_t offst = H2C_OFFSET;
     int pack_offset;
+    int packNum;
+    skb_node *tmp;
+    skb_node *Free_next;
+    skb_node *Free_cur;
     intrBuf=kmalloc(sizeof(int)*4, GFP_KERNEL);
     clearIntr=kmalloc(sizeof(int)*4, GFP_KERNEL);
     // 将 0xFFFF 存储到缓冲区中
@@ -342,36 +329,46 @@ static int Send_thread(void* data){// wait for condition and send data
     while(1) {
         wait_event_interruptible(my_wait_queue, write_condition);
         write_condition = 0;
-        if(skb_count[sgl_current]==0) { 
-            // printk(KERN_ERR "send_thread: skb_count[sgl_current]=0\n"); 
-            continue; 
-        } 
-        // printk(KERN_ERR "send thread ready to send skb count:%d\n",skb_count[sgl_current]);
-        sgl_current = 1 - sgl_current;// 设置current改变，现在就可以开始接收
+        sgl_current = 1 - sgl_current;
+        while(writeRingbuffer->WrInx != writeRingbuffer->RdInx) {
+            packNum = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->count;
+            while (packNum--) {
+                pci_send(xcdev,xdev, offst); 
+            }
 
-        pci_send(xcdev,xdev,offst); 
+            offst += PACK_SIZE;
+            if(offst >= RINGBUFFER_SIZE+H2C_OFFSET){
+                offst = H2C_OFFSET;
+            }
+            
+            tmp = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->head;
+            packNum = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->count;
+            while (packNum--) {
+                // TODO 这里不会自动把指针置为空，怎么检验free成功
+                kfree_skb(tmp->skb);
+                tmp = tmp->next;
+            } 
+            if(freeSkbList->count < FREE_SKB_MAX){
+                freeSkbList->ringbuffer[freeSkbList->Free++] = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx];
+                freeSkbList->Free %= FREE_SKB_MAX;
+                freeSkbList->count++;
+            }
+            else{ // 直接free掉申请数量过多的链表
+                Free_cur = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->head;
+                while(Free_cur){
+                    Free_next = Free_cur->next;
+                    kfree(Free_cur);
+                    Free_cur = Free_next;
+                }
+                kfree(writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]);
+            }
+            // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
+            ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);// send interrupt
+            ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);// clear interrupt
 
-        // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
-        offst += PACK_SIZE;
-        if(offst>=RINGBUFFER_SIZE+H2C_OFFSET){
-            offst = H2C_OFFSET;
+            writeRingbuffer->RdInx++;
+            writeRingbuffer->RdInx %= WriteRingSize;
         }
-
-        while (--skb_count[1-sgl_current]>=0) {
-            kfree_skb(pstskb_array[1-sgl_current][skb_count[1-sgl_current]]);// TODO 是不是不用释放
-        } 
-#if 0 /*debug 测试是否成功free  TODO测试打印为not null*/
-        if(pstskb_array[1-sgl_current][0]){ 
-            printk(KERN_ERR "debug send_thread: pstskb_array[1-sgl_current][0] is not null\n");
-        }else{
-            printk(KERN_ERR "debug send_thread: pstskb_array[1-sgl_current][0] is null\n");
-        }
-#endif
-        skb_count[1-sgl_current] = 0;
-
-        ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);// send interrupt
-        ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);// clear interrupt
-        // printk(KERN_ERR "send inter success\n");
     }
     // never reach
     return 0;
@@ -462,10 +459,8 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
                             }
                         }
                     #endif
-                    if (netif_rx(ddr_skb) == NET_RX_SUCCESS) {
-                        // printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
-                        // printk(KERN_ERR "netif_rx run success\n");
-                    }else{
+                    if (netif_rx(ddr_skb) != NET_RX_SUCCESS) 
+                    {
                         kfree_skb(ddr_skb);
                         printk(KERN_ERR "Rx-thread netif_rx run error\n");
                     }
@@ -510,29 +505,30 @@ static int configSKB(struct sk_buff *ddr_skb, unsigned char* skb_data, bool afte
 }
 
 static void Timer_Callback(struct timer_list *timer){// wake up send_thread
-        if(skb_count[sgl_current]==0)
-            return;
-        // printk(KERN_ERR "ready wake skb_count[sgl_current]:%d\n",skb_count[sgl_current]);
-        if(skb_count[1-sgl_current]==0){// 上一个数据包已经发送完成 TODO
-            write_condition = 1;
-            wake_up_interruptible(&my_wait_queue);
-        }
-        else{
-            printk(KERN_ERR "skb_count[1-sgl_current]=%d\n",skb_count[1-sgl_current]);
-        }
-        return ;
+    // printk(KERN_ERR "ready wake skb_count[sgl_current]:%d\n",skb_count[sgl_current]);
+    writeRingbuffer->ringbuffer[writeRingbuffer->WrInx++] = skb_head;
+    writeRingbuffer->WrInx %= WriteRingSize;
+    skb_head = NULL;
+    start_xmit_first = true; // TODO 这里会不会有问题，需不需要ping pong
+    if((writeRingbuffer->RdInx + 1) % WriteRingSize == writeRingbuffer->WrInx){ // ring buffer is empty, wake up send_thread
+        write_condition = 1;
+        wake_up_interruptible(&my_wait_queue);
+    }
+    return ;
 }
 
 int pci_send(struct xdma_cdev *xcdev, struct xdma_dev *xdev, loff_t offst) {
+    int nents, i=0, packNum;
+    packNum = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->count;
+    skb_node* tmp = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->head;
+    sg_init_table(sgl[1-sgl_current], packNum);
     
-    int nents,i=0;
-    sg_init_table(sgl[1-sgl_current], skb_count[1-sgl_current]);
-    
-    for (i = 0; i < skb_count[1-sgl_current]; i++) {
-        sg_set_buf(&sgl[1-sgl_current][i], pstskb_array[1-sgl_current][i]->data, MTU_SIZE);// pstskb_array[1-sgl_current][i]->len
+    for (i = 0; i < packNum; i++) {
+        sg_set_buf(&sgl[1-sgl_current][i], tmp->skb->data, MTU_SIZE);// pstskb_array[1-sgl_current][i]->len
+        tmp = tmp->next;
     }
 
-    nents = pci_map_sg(pdev, sgl[1-sgl_current], skb_count[1-sgl_current], DMA_TO_DEVICE);
+    nents = pci_map_sg(pdev, sgl[1-sgl_current], packNum, DMA_TO_DEVICE);
     if (nents == 0) {
         printk(KERN_ERR "pci_send Failed to map scatterlist\n");
         return 1;
@@ -540,12 +536,10 @@ int pci_send(struct xdma_cdev *xcdev, struct xdma_dev *xdev, loff_t offst) {
     // 设置 sg_table
     sgt.sgl = sgl[1-sgl_current];
     sgt.nents = nents;
-    sgt.orig_nents = skb_count[1-sgl_current];
+    sgt.orig_nents = packNum;
     my_xdma_xfer_submit(xdev,0,offst,&sgt,0);
 
     pci_unmap_sg(pdev, sgt.sgl, sgt.orig_nents, DMA_TO_DEVICE);
-    // printk(KERN_ERR "pci_send: xdma_xfer_submit, offst=%llx\n",offst);
-    // xdma_xfer_submit(xdev,0,1,offst,&sgt,1,10000); 
     return 0; 
 }
 
@@ -617,13 +611,32 @@ void pcie_close(void)
 
 static int __init mytun_init(void)
 {
-    int 				err;
+    int 				err,i=0,j=0;
+    skb_node* tmp;
     err = register_my_notifier(&my_notifier_block);
     if (err) {
         printk(KERN_ERR "Failed to register notifier: %d\n", err);
     }
     ringbuffer = Cl2FifoCreateFifo(RING_BUFF_DEPTH);
-    // printk(KERN_ERR "module_init\n" );
+    writeRingbuffer = kmalloc(sizeof(WriteRingbuffer), GFP_KERNEL);
+    writeRingbuffer->WrInx = 0;
+    writeRingbuffer->RdInx = 0;
+    freeSkbList = kmalloc(sizeof(FreeSkbList), GFP_KERNEL);
+    freeSkbList->Free = 0;
+    freeSkbList->Used = 0;
+    freeSkbList->count = FREE_SKB_MAX;
+    for(i=0;i<FREE_SKB_MAX;i++){
+        freeSkbList->ringbuffer[i] = kmalloc(sizeof(skb_list), GFP_KERNEL);
+        freeSkbList->ringbuffer[i]->head = kmalloc(sizeof(skb_node), GFP_KERNEL);
+        freeSkbList->ringbuffer[i]->count = 0;
+        tmp = freeSkbList->ringbuffer[i]->head;
+        for(j=0;j<MAX_SKBUFFS - 1;j++){
+            tmp->next = kmalloc(sizeof(skb_node), GFP_KERNEL);
+            tmp = tmp->next;
+        }
+    }
+
+    skb_head = NULL;
     g_stmytundev = alloc_netdev(0, MHYTUN_DEV_NAME, NET_NAME_ENUM, ether_setup);
     if ( !g_stmytundev )	{
         printk(KERN_ERR "alloc_error\n" );
