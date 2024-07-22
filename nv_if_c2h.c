@@ -245,7 +245,6 @@ static int send_thread(void *data){// write to ddr and send interrupt
     skb_node* tmp;
     skb_node *Free_next;
     skb_node *Free_cur;
-    RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
     while(1){
         wait_event_interruptible(my_wait_queue, send_condition);
         send_condition=0;
@@ -290,6 +289,8 @@ static int send_thread(void *data){// write to ddr and send interrupt
             }
             // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
             RWreg(MSI_INTERRUPT, 0x01, 1);        // send msi interrupt
+            RWreg(MSI_ENABLE, 0xabababab, 1);     // trigger, make msi intr come to use
+            // printk(KERN_ERR "send msi intr\n");
 
             writeRingbuffer->RdInx++;
             writeRingbuffer->RdInx %= WriteRingSize;
