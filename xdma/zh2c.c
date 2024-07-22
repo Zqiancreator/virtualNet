@@ -62,7 +62,6 @@ extern "C" {
 #define TIME_OUT                0
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH         6
-#define WRITE_RING_DEPTH        6
 #define WriteRingSize           100
 #define FREE_SKB_MAX            100
 /*******************************************************************************
@@ -140,33 +139,33 @@ extern ssize_t xdma_xfer_submit(void *dev_hndl, int channel, bool write, u64 ep_
 /*******************************************************************************
                         	  Global function declarations                          
  ******************************************************************************/
-    static struct net_device 		*g_stmytundev;
+static struct net_device 		*g_stmytundev;
 
-    static struct ifreq 		stifrtest;
-    typedef struct{
-        char *h2c0_path;
-        char *buffer_h2c;
-        u_int64_t buf_h2c_size;
-        struct file* h2c0;
+static struct ifreq 		stifrtest;
+typedef struct{
+    char *h2c0_path;
+    char *buffer_h2c;
+    u_int64_t buf_h2c_size;
+    struct file* h2c0;
 
-        char *c2h0_path;
-        char *buffer_c2h;
-        u_int64_t buf_c2h_size;
-        struct file* c2h0;
-    } xdma_device;
-    /* Assuming PCIe device */
-    xdma_device g_stpcidev;
+    char *c2h0_path;
+    char *buffer_c2h;
+    u_int64_t buf_c2h_size;
+    struct file* c2h0;
+} xdma_device;
+/* Assuming PCIe device */
+xdma_device g_stpcidev;
 
-    typedef struct skb_node {
-        struct sk_buff *skb;
-        struct skb_node *next;
-    }skb_node;
+typedef struct skb_node {
+    struct sk_buff *skb;
+    struct skb_node *next;
+}skb_node;
 
-    // 链表头结构
-    typedef struct skb_list {
-        int count;
-        struct skb_node *head;
-    }skb_list;
+// 链表头结构
+typedef struct skb_list {
+    int count;
+    struct skb_node *head;
+}skb_list;
 
 skb_list *skb_head;
 typedef struct Store_skb_list 
@@ -331,10 +330,8 @@ static int Send_thread(void* data){// wait for condition and send data
         write_condition = 0;
         sgl_current = 1 - sgl_current;
         while(writeRingbuffer->WrInx != writeRingbuffer->RdInx) {
-            packNum = writeRingbuffer->ringbuffer[writeRingbuffer->RdInx]->count;
-            while (packNum--) {
-                pci_send(xcdev,xdev, offst); 
-            }
+
+            pci_send(xcdev,xdev, offst); 
 
             offst += PACK_SIZE;
             if(offst >= RINGBUFFER_SIZE+H2C_OFFSET){
