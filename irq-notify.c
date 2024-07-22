@@ -102,20 +102,6 @@ static void send_notification(void);
 			// for(delay =0;delay<10000;delay++){};
 			send_notification();
 		}   
-
-
-		// #ifdef _DEBUG_CL2    
-		// if (bNextWrIx == psFifo->bRdIx)    
-		// {        
-		// 	cl2break(0x1400);    
-		// }
-		// #endif    
-
-		// #ifdef SHOW_CL2_FIFO    
-		// cl2print(_L2, _LOG_M, 
-		// 		"\n[F:0x%08x]P 0x%08x", 
-		// 		(U32)psFifo, (U32)psFifo->asPkt[psFifo->bWrIx]);
-		// #endif    
 	}
 
 	/*****************************************************************************
