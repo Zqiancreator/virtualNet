@@ -79,6 +79,8 @@ extern "C" {
 #define READ_ALIGN              8
 #define WriteRingSize           100
 #define FREE_SKB_MAX            100
+#define WriteRingSize           100
+#define FREE_SKB_MAX            100
 /*******************************************************************************
                               variable definitions                                
  ******************************************************************************/
