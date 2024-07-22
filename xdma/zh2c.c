@@ -96,8 +96,7 @@ char *intrBuf; // TODO 可以在线程里面定义
 char *clearIntr;
 char *msiData;
 loff_t intrPos=0x82000040;
-loff_t msiTest=0x82000070;
-loff_t msiReq= 0x82000068;
+loff_t msiReq= 0x82000078;
 struct net_device * mydev;
 static bool start_xmit_first = true;
 
@@ -361,7 +360,8 @@ static int Send_thread(void* data){// wait for condition and send data
             }
             // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
             ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);// send interrupt
-            ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);// clear interrupt
+            ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);
+            // clear interrupt 这里未来真正实现不需要在这里清中断，只需要在arm侧读清reason就可以达到清中断效果
 
             writeRingbuffer->RdInx++;
             writeRingbuffer->RdInx %= WriteRingSize;
@@ -374,12 +374,14 @@ static int Send_thread(void* data){// wait for condition and send data
 static int Intr_thread(void* data){// 接收中断线程 移动ringbuffer的Write指针，如果ringbuffer为空则通知读ddr线程
     int ret;
     msiData=kmalloc(sizeof(int)*4, GFP_KERNEL);
-    msiData[0] = 0x00;
-    msiData[1] = 0x00;
-    msiData[2] = 0x00;
-    msiData[3] = 0x00;
+    msiData[0] = 0xFF;
+    msiData[1] = 0xFF;
+    msiData[2] = 0xFF;
+    msiData[3] = 0xFF;
+    
     while(1){// 等待被唤醒，读取中断寄存器，改变ringbuffer指针,若ringbuffer为空，通知read
         wait_event_interruptible(my_wait_queue, Intr_condition);
+        Intr_condition = 0;
 
         // printk(KERN_ERR "debug Intr_thread: Intr_thread is running\n");
 
@@ -388,6 +390,7 @@ static int Intr_thread(void* data){// 接收中断线程 移动ringbuffer的Writ
         // printk(KERN_ERR "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
 
         ret = kernel_write(g_stpcidev.h2c0, msiData, 4, &msiReq);// clear msi interrupt
+
         // printk(KERN_ERR "debug Intr_thread: clear msi interrupt\n");
         if(((ringbuffer->bRdIx+1)&ringbuffer->bMax)==ringbuffer->bWrIx){// TODO 
             // printk(KERN_ERR "debug Intr_thread: ringbuffer is empty wake up read\n");
@@ -395,7 +398,6 @@ static int Intr_thread(void* data){// 接收中断线程 移动ringbuffer的Writ
             wake_up_interruptible(&my_wait_queue);
         }
 
-        Intr_condition = 0;
     }
     return 0;
 }
