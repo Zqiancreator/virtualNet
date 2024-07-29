@@ -64,7 +64,7 @@ extern "C" {
 #define WRITE_BASE              0x820000000 // 需要写入ddr的物理地址
 #define RINGBUFFER_SIZE         ((1<<RING_BUFF_DEPTH)*PACK_SIZE) 
 #define MEM_SIZE                0x100000      // 内存区域的大小
-#define MAX_SKBUFFS             32               // 单个包中含有的MTU数量 
+#define MAX_SKBUFFS             32              // 单个包中含有的MTU数量 
 #define MTU_SIZE                2000
 #define PACK_SIZE               MAX_SKBUFFS*MTU_SIZE // TODO
 // #define NET_IP_ALIGN            2  // processor.h 中定义为0
@@ -101,9 +101,7 @@ static struct net_device 		*g_stmytundev;
 static struct ifreq 		stifrtest;
 
 // kmap
-static struct page *page;
-static void *vaddr;
-static unsigned long pfn;  // 计算页帧号
+
 unsigned int *read_buff;
 struct sk_buff *ddr_skb;
 unsigned char *skb_data;
@@ -116,7 +114,7 @@ static struct sk_buff *tx_queue[QUEUE_SIZE];
 static struct timer_list my_timer;
 static unsigned long timer_interval_ms = TIME_OUT; // 定时器间隔（毫秒）
 // sendthread and timer callback
-unsigned int send_thread_offst=0;
+uint64_t send_thread_offst=0;
 unsigned int sendNum = 0;
 
 #if 1 /*计时每阶段耗时*/
@@ -140,8 +138,8 @@ unsigned int sendNum = 0;
  ******************************************************************************/
 static int read_thread(void* data);
 static int send_thread(void* data);
-static int read_ddr(int offst, int read_size);
-static int write_ddr(struct sk_buff *skb, int offst,int write_size);
+static int read_ddr(uint64_t offst, int read_size);
+static int write_ddr(struct sk_buff *skb, uint64_t offst,int write_size);
 static int configSKB(bool afterSetData);
 static void Timer_Callback(struct timer_list *timer);
 static unsigned int RWreg(unsigned long long BaseAddr, int value, int rw);
@@ -183,7 +181,7 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
 static void Timer_Callback(struct timer_list *timer){// 发送中断操作不能在中断处理函数中完成，
         Intr_condition = 1;
         wake_up_interruptible(&my_wait_queue);// 唤醒发送中断线程
-        if(sendNum != MAX_SKBUFFS){
+        if(sendNum != MAX_SKBUFFS) {
             send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
             // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
         }
@@ -195,8 +193,11 @@ static int intr_thread(void *data){
     while(1){
         wait_event_interruptible(my_wait_queue, Intr_condition);
         Intr_condition=0;
+
+        RWreg(0x82000078, 0x01, 1);         // clear msi interrupt
         RWreg(MSI_INTERRUPT, 0x01, 1);        // send msi interrupt
         RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
+        printk(KERN_ERR "send msi intr\n");
 
     }     
 }
@@ -205,13 +206,12 @@ static int intr_thread(void *data){
 *******************************************************************************/
 static int send_thread(void *data){// write to ddr and send interrupt
     struct sk_buff *skb;
-    RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
     while(1){
         wait_event_interruptible(my_wait_queue, send_condition);
         send_condition=0;
         // 处理发送队列中的数据包
         while (tx_queue_head != tx_queue_tail) {
-            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(1)); // TODO 留1ms来写入ddr
+            // mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(1)); // TODO 留1ms来写入ddr
             skb = tx_queue[tx_queue_head];
             if(!skb){
                 printk(KERN_ERR "error skb is null, tx queue head=%d\n",tx_queue_head);
@@ -224,7 +224,6 @@ static int send_thread(void *data){// write to ddr and send interrupt
                     printk(KERN_ERR "%x,",skb->data[i]);
                 }
             #endif
-            start3 = ktime_get();
             // 实际发送数据包 发送一个包
             write_ddr(skb, send_thread_offst, MTU_SIZE);
             
@@ -247,9 +246,37 @@ static int send_thread(void *data){// write to ddr and send interrupt
             // printk(KERN_ERR "after change send_thread_offst, send_thread_offst=%x,tx_queue_head=%x\n",send_thread_offst,tx_queue_head);
 
             if(++sendNum == MAX_SKBUFFS){
+                printk(KERN_ERR "full sendNum=%d\n",sendNum);
                 mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数发送中断
-            }else
+            }else{
+#if 1
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms)); // 设置下一个包到来的超时时间
+#else /* 不攒包，不用超时 */
+            if(sendNum != MAX_SKBUFFS){ /*把写完的数据后面的数据抹除掉*/
+                unsigned long pfn;
+                void *vaddr;
+                struct page *page;
+                unsigned int Page_index = 0;
+                pfn = (WRITE_BASE + send_thread_offst) >> PAGE_SHIFT;
+                Page_index = send_thread_offst % PAGE_SIZE;
+                page = pfn_to_page(pfn);
+                vaddr = kmap(page);
+                memset(vaddr+Page_index, 0, MTU_SIZE);// TODO 需要清除缓存？
+                kunmap(page);
+
+                send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
+                // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
+            }
+            sendNum = 0;
+
+            RWreg(0x82000078, 0x01, 1);         // clear msi interrupt
+            RWreg(MSI_INTERRUPT, 0x01, 1);        // send msi interrupt
+            RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
+            // RWreg(MSI_INTERRUPT, 0x00, 1);        // send msi interrupt
+            // RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
+            printk(KERN_ERR "send msi intr\n");
+#endif
+            }
 
             dev_kfree_skb(skb);
         }
@@ -259,7 +286,7 @@ static int send_thread(void *data){// write to ddr and send interrupt
 
 static int read_thread(void *data)
 {// 一直等待直到收到buffer为空的消息
-    static u32 read_offset = 0;
+    static uint64_t read_offset = 0;
     int ret;
     struct iphdr *iph;// debug, check header
     read_offset = ringbuffer->bRdIx*PACK_SIZE;// TODO
@@ -270,15 +297,8 @@ static int read_thread(void *data)
     }
 
     while(1){
-#if 0
-        start6 = ktime_get();
-        printk(KERN_ERR "read_thread once took %lld ns to execute\n", delta5);
-        end6 = ktime_get();
-        delta6 = ktime_to_ns(ktime_sub(end6, start6));
-        printk(KERN_ERR "one printk took %lld ns to execute\n", delta6);
-        start5 = ktime_get();
-#endif
         wait_event_interruptible(my_wait_queue, read_condition);
+        read_condition = 0;
         while(ringbuffer->bRdIx!=ringbuffer->bWrIx){
             // printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
             if(read_ddr(read_offset, PACK_SIZE) == -1){
@@ -290,12 +310,7 @@ static int read_thread(void *data)
             ringbuffer->bRdIx += 1;
             ringbuffer->bRdIx &= ringbuffer->bMax;
         }
-#if 0
-        end5 = ktime_get();
-        delta5 = ktime_to_ns(ktime_sub(end5, start5));
-#endif
 
-        read_condition = 0;
     }
     // never reach
     return 0;
@@ -362,10 +377,6 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
             return NETDEV_TX_OK;
         }
 
-    // end2 = ktime_get();
-    // delta2 = ktime_to_ns(ktime_sub(end2, start2));
-    // printk(KERN_INFO "net process pack and reply took %lld ns to execute.\n", delta2);
-
     // 将数据包添加到发送队列 TODO 判满
     tx_queue[tx_queue_tail] = skb;
     tx_queue_tail = (tx_queue_tail + 1) % QUEUE_SIZE;
@@ -383,8 +394,6 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     }
     // 返回 NETDEV_TX_OK 表示数据包已成功发送或已被处理
     return NETDEV_TX_OK;
-
-    return NET_RX_DROP;
 }
 
 static int mytun_set_mac_address(struct net_device *dev, void *p) {
@@ -530,9 +539,8 @@ void invalidate_cache(void *start, size_t size) {
     asm volatile ("isb" ::: "memory");
 }
 
-static int write_ddr(struct sk_buff *skb,int offst,int write_size){
+static int write_ddr(struct sk_buff *skb,uint64_t offst,int write_size){
     // write one skb data,假设现在每次写的数量不超过一页，1500<4096 即 write_size < PAGE_SIZE
-    start4 = ktime_get();
     uint32_t current_char;
     unsigned int Page_index = 0;
     int ret = 0;
@@ -546,7 +554,7 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
     Page_index = offst % PAGE_SIZE;
     write_size += Page_index;
     currentSize = write_size > PAGE_SIZE? write_size - PAGE_SIZE:0;
-    int testPageIndex =Page_index;
+
 #if 0
     iph = (struct iphdr *)(skb_network_header(skb));
     printk(KERN_ERR "debug write ddr Protocol:%d, len:%d, ipsaddr:%x, daddr:%x,offst=%x\n",iph->protocol, skb->len, iph->saddr, iph->daddr,offst);
@@ -575,8 +583,9 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
             *(unsigned int *)(vaddr + Page_index) = *((unsigned int *)(skb->data + index));
 
         }
-
-        
+#if 1 /* 写完一个包后把这个包后面的数据置0,需要在清除缓存操作之前执行 */
+        memset(vaddr + Page_index, 0, 10);
+#endif
         mb();  // Memory barrier before write
         // flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
         flush_dcache(vaddr, PAGE_SIZE);
@@ -600,12 +609,15 @@ static int write_ddr(struct sk_buff *skb,int offst,int write_size){
         pfn += 1;
         // printk(KERN_ERR "next page\n");
     }
+
     // printk(KERN_ERR "write success\n");
-    end4 = ktime_get();
     return 0;
 }
 
-static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE   TODO offset,read_size 类型
+static int read_ddr(uint64_t offst,int read_size){// read_size>PAGE_SIZE   TODO offset,read_size 类型
+    struct page *page;
+    void *vaddr;
+    unsigned long pfn;  // 计算页帧号
     uint64_t current_char;
     unsigned int index=0;
     unsigned int Page_index;
@@ -630,7 +642,7 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE   TODO offse
         skb_reserve(ddr_skb, NET_IP_ALIGN);
         skb_data = skb_put(ddr_skb, MTU_SIZE);
     #endif
-    while(read_size>0&&packNum<MAX_SKBUFFS){
+    while(read_size>0&&packNum<MAX_SKBUFFS) {
 
         page = pfn_to_page(pfn);
         if (!page) {
@@ -647,26 +659,35 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE   TODO offse
         asm volatile ("dsb ish" : : : "memory"); 
         invalidate_cache(vaddr, PAGE_SIZE); // 无效硬件缓存，使得数据从内存中读取
         // 访问内存
-        for(;Page_index<PAGE_SIZE;index+=READ_ALIGN,Page_index+=READ_ALIGN,TotalSize+=READ_ALIGN){
+        for(;Page_index<PAGE_SIZE;index+=READ_ALIGN,Page_index+=READ_ALIGN,TotalSize+=READ_ALIGN) {
             #if 0 /*ldxr需要八字节对齐 ldxr指令能保证原子性但开销更大*/
                 if((unsigned long)vaddr%8!=0)
                     printk(KERN_ERR "error vaddr=%p\n",vaddr);
                 asm volatile ("ldxr %0, [%1]" : "=&r" (current_char) : "r" (vaddr + Page_index)); 
             #endif
-            // current_char = *(volatile uint64_t *)(vaddr + Page_index);
-            // *((uint64_t *)(skb_data + index)) = current_char;
+
             *((uint64_t *)(skb_data + index)) = *(volatile uint64_t *)(vaddr + Page_index);
-            if(index == MTU_SIZE-READ_ALIGN){// 读取到一个完整skb,发回上层 
-            asm volatile ("dsb ish" : : : "memory"); 
+            if(index == 0) { // 每个包读取后清除开头
+                *(volatile uint64_t *)(vaddr + Page_index) = 0x00;
+                flush_dcache(vaddr + Page_index, READ_ALIGN);
+            }
+            if(index == MTU_SIZE-READ_ALIGN) {// 读取到一个完整skb,发回上层 
+                asm volatile ("dsb ish" : : : "memory"); 
                 // printk(KERN_ERR "read ddr send skb, index=%x,TotalSize=%x,ddr_skb->len=%x\n",index,TotalSize,ddr_skb->len);
                 index = -READ_ALIGN;
                 
                 configSKB(true);
 
-                iph = (struct iphdr *)(skb_network_header(ddr_skb));
-                
                 if(ddr_skb){
                     if (netif_rx(ddr_skb) == NET_RX_SUCCESS) {
+                        if(skb_data[0] == 0x00 || skb_data[0] == 0xff){
+                            printk(KERN_ERR "data is null\n");
+                            break;
+                        }
+                        #if 0
+                            iph = (struct iphdr *)(skb_network_header(ddr_skb));
+                            printk(KERN_ERR "read ddr netif_rx run success: iph->saddr=%x,iph->daddr=%x,skb->protocol=%x,iph->protocol=%x, Value at address: 0x%lx\n",iph->saddr,iph->daddr,ddr_skb->protocol,iph->protocol, READ_BASE + offst + TotalSize + READ_ALIGN - MTU_SIZE);
+                        #endif
                         #if 0 /*debug 打印目标地址不对的包具体数据*/
                             if(iph->daddr!=0xd18a8c0){
                                 int i=0;
@@ -676,14 +697,6 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE   TODO offse
                                 }
                             }
                         #endif
-#if 0
-                        if(iph->daddr==0xd18a8c0)
-                            start2 = ktime_get();
-                        end = ktime_get();
-                        delta = ktime_to_ns(ktime_sub(end, start));
-                        printk(KERN_INFO "read MTU and netif_rx took %lld ns to execute.\n", delta);
-#endif
-                        // printk(KERN_ERR "read ddr netif_rx run success: iph->saddr=%x,iph->daddr=%x,skb->protocol=%x,iph->protocol=%x, Value at address: 0x%lx\n",iph->saddr,iph->daddr,ddr_skb->protocol,iph->protocol, READ_BASE + offst + TotalSize + READ_ALIGN - MTU_SIZE);
                     }else
                         printk(KERN_ERR "read ddr netif_rx run error\n");
                 }
@@ -717,6 +730,14 @@ static int read_ddr(int offst,int read_size){// read_size>PAGE_SIZE   TODO offse
     }
     // printk(KERN_ERR "read ddr success,readsize=%x,index=%x\n",read_size,index);
     kfree(ddr_skb); 
+#if 0 /*读完数据后把数据初始化*/
+    pfn = (READ_BASE+offst) >> PAGE_SHIFT;
+    Page_index = offst % PAGE_SIZE;
+    page = pfn_to_page(pfn);
+    vaddr = kmap(page);
+    memset(vaddr+Page_index, 0, MTU_SIZE);
+    kunmap(page);
+#endif
     return 0;
 }
 
