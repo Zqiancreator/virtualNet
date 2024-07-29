@@ -50,7 +50,7 @@ extern "C" {
 #define H2C_OFFSET              0x800000000
 #define C2H_OFFSET              0x820000000
 #define RINGBUFFER_SIZE         ((1<<RING_BUFF_DEPTH)*PACK_SIZE)
-#define MAX_SKBUFFS             32 
+#define MAX_SKBUFFS             32
 #define DEST_HOST_IP            0x0c18a8c0
 #define DEST_CARD_IP            0x0d18a8c0
 #define BOARD_IP                0xff18a8c0
@@ -192,7 +192,6 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     #endif
 
     if (skb_count[sgl_current] < MAX_SKBUFFS) { 
-        
         pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
         // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
         if (skb_count[sgl_current] == MAX_SKBUFFS) {
@@ -327,7 +326,7 @@ static int Send_thread(void* data){// wait for condition and send data
 
         // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
         offst += PACK_SIZE;
-        if(offst>=RINGBUFFER_SIZE+H2C_OFFSET){
+        if(offst>=(RINGBUFFER_SIZE+H2C_OFFSET)){
             offst = H2C_OFFSET;
         }
 
@@ -344,8 +343,8 @@ static int Send_thread(void* data){// wait for condition and send data
         skb_count[1-sgl_current] = 0;
 
         ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);// send interrupt
-        ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);// clear interrupt
-        // printk(KERN_ERR "send inter success\n");
+        // ret = kernel_write(g_stpcidev.h2c0, clearIntr, 4, &intrPos);// clear interrupt
+        printk(KERN_ERR "send inter success\n");
     }
     // never reach
     return 0;
@@ -360,22 +359,20 @@ static int Intr_thread(void* data){// 接收中断线程 移动ringbuffer的Writ
     msiData[3] = 0xFF;
     while(1){// 等待被唤醒，读取中断寄存器，改变ringbuffer指针,若ringbuffer为空，通知read
         wait_event_interruptible(my_wait_queue, Intr_condition);
+        Intr_condition = 0;
+        // ret = kernel_write(g_stpcidev.h2c0, msiData, 4, &msiTest);// clear msi interrupt has to run in thread
 
-        // printk(KERN_ERR "debug Intr_thread: Intr_thread is running\n");
 
         ringbuffer->bWrIx+=1;            
         ringbuffer->bWrIx&=ringbuffer->bMax;            
-        // printk(KERN_ERR "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
+        printk(KERN_ERR "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
 
-        ret = kernel_write(g_stpcidev.h2c0, msiData, 4, &msiTest);// clear msi interrupt
         // printk(KERN_ERR "debug Intr_thread: clear msi interrupt\n");
         if(((ringbuffer->bRdIx+1)&ringbuffer->bMax)==ringbuffer->bWrIx){// TODO 
             // printk(KERN_ERR "debug Intr_thread: ringbuffer is empty wake up read\n");
             read_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
-
-        Intr_condition = 0;
     }
     return 0;
 }
@@ -407,7 +404,7 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
                 skb_data = skb_put(ddr_skb, MTU_SIZE);
                 ddr_skb->dev = mydev;
                 // configSKB(ddr_skb, skb_data, false);
-
+                // printk(KERN_ERR "read offset=%x\n",offst);
                 ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0,skb_data,MTU_SIZE,&offst); 
 
                 // configSKB(ddr_skb, skb_data, true);
@@ -416,13 +413,6 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
 
                 ddr_skb->protocol = eth_type_trans(ddr_skb, mydev); // 设置协议为IP
                 ddr_skb->ip_summed = CHECKSUM_UNNECESSARY;
-#if 0
-                iph = (struct iphdr *)(skb_network_header(ddr_skb));
-                if(iph)
-                    printk(KERN_ERR "Receive-thread Protocol:%d, len:%d, ipsaddr:%x, daddr:%x\n",iph->protocol, ddr_skb->len, iph->saddr, iph->daddr); 
-                else
-                    printk(KERN_ERR "debug Receive-thread iph is null");
-#endif
                 if(ddr_skb){
                     // printk(KERN_ERR "debug Rx-thread ringbuffer->bRead:%x,ringbuffer->bWrIx:%x,offst=%llx,index=%d\n",ringbuffer->bRdIx,ringbuffer->bWrIx,offst,index);
         
@@ -438,21 +428,41 @@ static int Receive_thread(void* data){// 读取ddr线程 从ddr读取数据后�
                         }
                     #endif
                     if (netif_rx(ddr_skb) == NET_RX_SUCCESS) {
+                        #if 1 /* 找到为空数据后直接找下一个包中数据 */
+                            if(ddr_skb->data[0]==0xff||ddr_skb->data[0]==0x00){
+                                // printk(KERN_ERR "data is null index=%d, offset=%x\n",index, offst);
+                                index--;
+                                break;
+                            }
+                        #endif
+                        #if 0
+                            iph = (struct iphdr *)(skb_network_header(ddr_skb));
+                            if(iph)
+                                printk(KERN_ERR "Receive-thread Protocol:%d, len:%d, ipsaddr:%x, daddr:%x\n",iph->protocol, ddr_skb->len, iph->saddr, iph->daddr); 
+                            else
+                                printk(KERN_ERR "debug Receive-thread iph is null");
+                        #endif
                         // printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
                         // printk(KERN_ERR "netif_rx run success\n");
-                    }else{
+                    } else {
                         kfree_skb(ddr_skb);
                         printk(KERN_ERR "Rx-thread netif_rx run error\n");
                     }
-                }
-                else
+                } else
                     printk(KERN_ERR "Rx-thread ddr_skb is null");
+
                 if(ret<=0)
                     printk(KERN_ERR "Rx-thread read ddr error,ret=%x\n",ret);
 
                 
                 offst += MTU_SIZE;
-                if(offst>=RINGBUFFER_SIZE+C2H_OFFSET){
+                if(offst>=(RINGBUFFER_SIZE+C2H_OFFSET)){
+                    offst = C2H_OFFSET;
+                }
+            }
+            while(index++ < MAX_SKBUFFS){
+                offst += MTU_SIZE;
+                if(offst>=(RINGBUFFER_SIZE+C2H_OFFSET)){
                     offst = C2H_OFFSET;
                 }
             }
@@ -489,11 +499,12 @@ static void Timer_Callback(struct timer_list *timer){// wake up send_thread
             return;
         // printk(KERN_ERR "ready wake skb_count[sgl_current]:%d\n",skb_count[sgl_current]);
         if(skb_count[1-sgl_current]==0){// 上一个数据包已经发送完成 TODO
+            printk(KERN_ERR "skb_count[sgl_current] = %d\n",skb_count[sgl_current]);
             write_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
         else{
-            printk(KERN_ERR "skb_count[1-sgl_current]=%d\n",skb_count[1-sgl_current]);
+            printk(KERN_ERR "error last pack is sending skb_count[1-sgl_current]=%d\n",skb_count[1-sgl_current]);
         }
         return ;
 }
@@ -732,7 +743,7 @@ static int __init mytun_init(void)
     } 
 
 
-#if 0
+#if 1
     cpumask_t cpuset;
 
     // set every thread to different cpu
