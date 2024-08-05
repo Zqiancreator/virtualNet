@@ -61,9 +61,10 @@ extern "C"
 #define PCI_PID 0x9034
 #define SGL_NUM 2
 #define TIME_OUT 5
+#define MSI_TIME_OUT 6000
 #define MS_TO_JIFFIES(ms) ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH 6
-#define MSI_BIT 0x08
+#define MSI_BIT 0x04
     /*******************************************************************************
                                   Type definitions
      ******************************************************************************/
@@ -82,7 +83,9 @@ extern "C"
     static struct task_struct *receive_thread;
     static struct task_struct *intr_thread;
     static struct timer_list my_timer;
+    static struct timer_list msi_timer;
     static unsigned long timer_interval_ms = TIME_OUT; // 定时器间隔（毫秒）
+    static unsigned long msi_interval_ms = MSI_TIME_OUT; // 定时器间隔（毫秒）
     struct xdma_cdev *xcdev;
     struct xdma_dev *xdev;
     // wait queue
@@ -90,13 +93,14 @@ extern "C"
     static int read_condition = 0;
     static int Intr_condition = 0;
     static int write_condition = 0;
-    char *intrBuf; // TODO 可以在线程里面定义
-    char *IntrAck;
-    char *msiData;
-    char *update_magic_num;
+    unsigned char *intrBuf; // TODO 可以在线程里面定义
+    unsigned char *IntrAck;
+    unsigned char *msiData;
+    unsigned char *update_magic_num;
     loff_t intrPos = 0x82000040;
     loff_t msiTest = 0x82000078;
     loff_t msiCnt = 0x820000d0;
+    loff_t msiClear = 0x82000070;
     loff_t msiReq = 0x82000068;
     loff_t updateCnt = 0x82000054;
     loff_t updateAck = 0x82000044;
@@ -112,6 +116,7 @@ extern "C"
     static int Receive_thread(void *data);
     static int Intr_thread(void *data);
     static void Timer_Callback(struct timer_list *timer);
+    static void Msi_Timer(struct timer_list *timer);
     static int configSKB(struct sk_buff *ddr_skb, unsigned char *skb_data, bool afterSetData);
     static void syncRingbuffer(void);
     /*******************************************************************************
@@ -195,14 +200,18 @@ extern "C"
 
         if (skb_count[sgl_current] < MAX_SKBUFFS)
         {
+            if(skb_count[sgl_current] < 0)
+                printk(KERN_ERR "error start_xmit skb_count[sgl_current] = %d\n", skb_count[sgl_current]);
+
             pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
             // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
-            if (skb_count[sgl_current] == MAX_SKBUFFS)
-            {
+            if (skb_count[sgl_current] == MAX_SKBUFFS){
+                printk(KERN_ERR "skb count is full\n");
                 mod_timer(&my_timer, jiffies - 1); // 立即超时，自动调用回调函数
             }
             else
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
+
         }
         else
         {
@@ -282,7 +291,7 @@ extern "C"
             wait_event_interruptible(my_wait_queue, write_condition);
             if (skb_count[sgl_current] == 0)
             {
-                printk(KERN_ERR "error send_thread: skb_count[sgl_current]=0\n");
+                printk(KERN_ERR "error send_thread: skb_count[sgl_current]=0,skb_count[1-sgl_current]=%x\n", skb_count[1-sgl_current]);
                 continue;
             }
             // printk(KERN_ERR "send thread ready to send skb count:%d\n",skb_count[sgl_current]);
@@ -290,7 +299,7 @@ extern "C"
 
             pci_send(xcdev, xdev, offst);
 
-            // printk(KERN_ERR "send end, offst=%x, pstskb_array[1-sgl_current][0]=%x\n",offst,pstskb_array[1-sgl_current][0]);
+            printk(KERN_ERR "send end, offst=%x\n",offst);
             offst += PACK_SIZE;
             if (offst >= (RINGBUFFER_SIZE + H2C_OFFSET))
             {
@@ -306,14 +315,11 @@ extern "C"
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateAck);
             if ((IntrAck[0] >> 4) == 0x0)
             {   /* 中断已经被清除,发送新的中断 */
-                printk(KERN_ERR "send intr\n"); // 0为第一次发送中断，1为arm对中断回了ack，其他值为错误
                 ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos); 
+                printk(KERN_ERR "send inter\n");
             }
-            else
-            {
-                printk(KERN_ERR "intr hasn't been cleared\n");
-                ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateCnt); // 验证increase cnt
-            }
+            
+            ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateCnt);
             printk(KERN_ERR "update cnt=%x,%x,%x,%x\n", IntrAck[0], IntrAck[1], IntrAck[2], IntrAck[3]);
 
             skb_count[1 - sgl_current] = 0;
@@ -378,6 +384,7 @@ extern "C"
             }
             ret = kernel_write(g_stpcidev.h2c0, msiData, 4, &msiTest); // clear msi inter
             Intr_condition = 0;
+            mod_timer(&msi_timer, jiffies + MS_TO_JIFFIES(msi_interval_ms));
             printk(KERN_ERR "clear msi inter\n");
         }
         return 0;
@@ -436,9 +443,9 @@ extern "C"
 
                         if (netif_rx(ddr_skb) == NET_RX_SUCCESS)
                         {
-                            if (ddr_skb->data[0] == 0xff || ddr_skb->data[0] == 0x00)
+                            if (ddr_skb->data[1] == 0xff || ddr_skb->data[1] == 0x00)
                             {
-                                // printk(KERN_ERR "data is null index=%d, offset=%llx\n",index, (offst - index * MTU_SIZE) + MTU_SIZE);
+                                printk(KERN_ERR "data is null index=%d, offset=%llx\n",index, (offst - index * MTU_SIZE) + MTU_SIZE);
                                 index--;
                                 break;
                             }
@@ -510,22 +517,33 @@ extern "C"
         return 0;
     }
 
+    static void Msi_Timer(struct timer_list *timer){
+        if(Intr_condition == 0) {
+            printk(KERN_ERR "msi timer wake up Intr_thread\n");
+            Intr_condition = 1;
+            wake_up_interruptible(&my_wait_queue);
+        }
+        else
+            printk(KERN_ERR "error: msi timer Intr_condition is not 0\n");
+        return NOTIFY_OK;
+    }
+
     static void Timer_Callback(struct timer_list *timer)
     { // wake up send_thread
         if (skb_count[sgl_current] == 0){
-            printk(KERN_ERR "error skb_count is 0\n");
+            printk(KERN_ERR "error skb_count is 0, skb_count[1-sgl_current] = %d\n", skb_count[1-sgl_current]);
             return;
         }
         // printk(KERN_ERR "ready wake skb_count[sgl_current]:%d\n",skb_count[sgl_current]);
         if (skb_count[1 - sgl_current] == 0&&write_condition == 0)
         { // 上一个数据包已经发送完成 TODO
-            printk(KERN_ERR "skb_count[sgl_current] = %d\n", skb_count[sgl_current]);
+            printk(KERN_ERR "mytimer Call back skb_count = %d\n", skb_count[sgl_current]);
             write_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
         else
         {
-            printk(KERN_ERR "error last pack is sending skb_count[1-sgl_current]=%d\n", skb_count[1 - sgl_current]);
+            printk(KERN_ERR "error last pack is sending skb_count[1-sgl_current]=%d, skb_count[sgl_current] = %d, write_condition=%d\n", skb_count[1 - sgl_current], skb_count[sgl_current], write_condition);
         }
         return;
     }
@@ -540,13 +558,14 @@ extern "C"
         {
             sg_set_buf(&sgl[1 - sgl_current][i], pstskb_array[1 - sgl_current][i]->data, MTU_SIZE); // pstskb_array[1-sgl_current][i]->len
         }
-
+        printk(KERN_ERR "before, %x\n", skb_count[1 - sgl_current]);
         nents = pci_map_sg(pdev, sgl[1 - sgl_current], skb_count[1 - sgl_current], DMA_TO_DEVICE);
         if (nents == 0)
         {
             printk(KERN_ERR "pci_send Failed to map scatterlist\n");
             return 1;
         }
+        printk(KERN_ERR "after\n");
         // 设置 sg_table
         sgt.sgl = sgl[1 - sgl_current];
         sgt.nents = nents;
@@ -756,6 +775,7 @@ extern "C"
         xcdev = (struct xdma_cdev *)g_stpcidev.h2c0->private_data;
         xdev = xcdev->xdev;
         timer_setup(&my_timer, Timer_Callback, 0);
+        timer_setup(&msi_timer, Msi_Timer, 0);
         send_thread = kthread_run(Send_thread, NULL, "send_thread");
         if (IS_ERR(send_thread))
         {
@@ -813,6 +833,7 @@ extern "C"
         unregister_netdev(g_stmytundev);
         free_netdev(g_stmytundev);
         del_timer(&my_timer);
+        del_timer(&msi_timer);
         if (send_thread)
         {
             kthread_stop(send_thread);
