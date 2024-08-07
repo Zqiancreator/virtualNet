@@ -43,7 +43,7 @@ static char 			devname[16];
 static int 				major;
 static int             	mijor;
 static struct class*	cls=NULL;
-static resource_size_t  remap_size;  
+//static resource_size_t  remap_size;
 static int	            irq;
 static int 				diff_value;
 static void __iomem*	base_address;	
@@ -97,11 +97,11 @@ static int notify_thread(void *data);
 	*****************************************************************************/
 	void Cl2FifoPutPacket(Cl2_Packet_Fifo_Type *psFifo)
 	{    
-		u8 bNextWrIx;
-		u16 delay=0;
-		printk(KERN_ERR "recv intr\n"); 
+		//u8 bNextWrIx;
+		//u16 delay=0;
+		
+		//printk(KERN_INFO "recv intr\n"); 
 		ioread32(base_address + base_offset);
-		// bNextWrIx = (psFifo->bWrIx + 1) & psFifo->bMax;
 		psFifo->bWrIx = (psFifo->bWrIx + 1) & psFifo->bMax;
 		if(notify_condition == 0)
 		{
@@ -110,8 +110,7 @@ static int notify_thread(void *data);
 		}else{
 			printk(KERN_ERR "intr is too fast\n");
 		}
-		/* empty, notify c2h device*/    
-		   
+		/* empty, notify c2h device*/
 	}
 
 	/*****************************************************************************
@@ -182,7 +181,8 @@ static int notify_thread(void *data){
 	uint32_t update_count = 0;
 	uint16_t current_cnt = 0;
 	uint16_t last_cnt = 0;
-	while(1){
+
+	while(!kthread_should_stop()){
 		wait_event_interruptible(thread_wait, notify_condition);
 		update_count = ioread32(update_base + update_offset); // update_cnt
 		if(update_count >= 0x80000000) { // 最高位为1, 同步 TODO
@@ -196,13 +196,14 @@ static int notify_thread(void *data){
 				current_cnt -= last_cnt;
 			else 
 				current_cnt = current_cnt + (0xFFFF - last_cnt + 1);
+
 			last_cnt = update_count & 0xFFFF;
 			ringbuffer->bWrIx = (ringbuffer->bWrIx + current_cnt) & ringbuffer->bMax;
-			printk(KERN_ERR "ringbuffer->bWrIx=%2lx,ringbuffer->bRdIx=%2lx\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
-			// printk(KERN_ERR "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);
+			// printk(KERN_ERR "ringbuffer->bWrIx=%2lx,ringbuffer->bRdIx=%2lx\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
+			printk(KERN_INFO "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);
 			// printk(KERN_ERR "current_cnt=%lx,last_cnt=%lx,update_cnt=%lx\n",current_cnt, last_cnt, update_count);
-			if (((ringbuffer->bRdIx + current_cnt) & ringbuffer->bMax) == ringbuffer->bWrIx) {        
-				// printk(KERN_ERR "send notify\n");
+			if (((ringbuffer->bRdIx + current_cnt) & ringbuffer->bMax) == ringbuffer->bWrIx) {
+				// printk(KERN_INFO "send notify\n");
 				send_notification();
 			}
 		}
@@ -295,23 +296,26 @@ static struct file_operations irq_fops = {
  
 static int irq_probe(struct platform_device *pdev)
 {
-	int					err;
+	int	          err;
 	struct device *tmp_dev;
 	int irqindex = 0;
 
-    printk("hello intr\n");
-	Notify_thread = kthread_run(notify_thread, NULL, "notify_thread");
 #if 1
-	unsigned long long BaseAddr = CLEAR_INTR;
-	base_offset = BaseAddr & ~PAGE_MASK;
-    BaseAddr &= PAGE_MASK;
-	base_address = ioremap(BaseAddr, PAGE_SIZE);
+    unsigned long long BaseAddr = CLEAR_INTR;
+    unsigned long long UpdateBaseAddr = UPDATE_CNT;
 
-	unsigned long long UpdateBaseAddr = UPDATE_CNT;
-	update_offset = UpdateBaseAddr & ~PAGE_MASK;
+    base_offset = BaseAddr & ~PAGE_MASK;
+    BaseAddr &= PAGE_MASK;
+    base_address = ioremap(BaseAddr, PAGE_SIZE);
+
+    update_offset = UpdateBaseAddr & ~PAGE_MASK;
     UpdateBaseAddr &= PAGE_MASK;
-	update_base = ioremap(UpdateBaseAddr, PAGE_SIZE);
+    update_base = ioremap(UpdateBaseAddr, PAGE_SIZE);
 #endif
+
+    printk("hello intr\n");
+    Notify_thread = kthread_run(notify_thread, NULL, "notify_thread");
+	
 	ringbuffer = Cl2FifoCreateFifo(RING_BUFF_DEPTH);
 	if (cls) {
 		printk("device exit\n");	

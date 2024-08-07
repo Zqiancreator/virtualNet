@@ -70,6 +70,10 @@ extern "C" {
 // #define NET_IP_ALIGN            2  // processor.h 中定义为0
 #define MSI_ENABLE              0x82000060
 #define MSI_INTERRUPT           0x82000068
+#define MSI_CHECK_CLEAR         0x82000070
+#define MSI_COUNT               0x820000d0
+#define UPDATE_CNT	            0x82000054	
+#define MSI_CLEAR               0x82000078
 #define MAC_OFFSET              0 // 14
 #define RING_BUFF_DEPTH         6           // ringbuff中含有1<<RING_BUFF_DEPTH 个PACKAGE
 #define QUEUE_SIZE              100
@@ -182,8 +186,8 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
     static void Timer_Callback(struct timer_list *timer){// 发送中断操作不能在中断处理函数中完成，
             if(Intr_condition == 0)
                 Intr_condition = 1;
-            else 
-                printk(KERN_ERR "error, send intr too fast\n");
+            // else 
+            //     printk(KERN_ERR "error, send intr too fast\n");
             wake_up_interruptible(&my_wait_queue);// 唤醒发送中断线程
             if(sendNum != MAX_SKBUFFS) {
                 send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
@@ -196,7 +200,7 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
     static void syncRingbuffer(){
         int ret;
         unsigned int msiCount = 0;
-        RWreg(0x820000d0, 0x80000000, 1);         // set msi count
+        RWreg(UPDATE_CNT, 0x80000000, 1);         // set msi count
         RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
         RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
         msiCount = RWreg(0x820000d0, 0x00, 0);         // read msi count
@@ -209,19 +213,41 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
 
 static int intr_thread(void *data){
     unsigned int readVal, intrVal;
+
+    RWreg(MSI_COUNT, 0x00000000, 1);         // init msi count
+    RWreg(UPDATE_CNT, 0x00000000, 1);         // init update count
+
+    RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
+    RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
+    while(1) {
+        ssleep(10);
+        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);          
+        if(intrVal == 0x00) { // 中断已经被清除，结束 
+            printk(KERN_INFO "host has received intr\n");
+            break;
+        } else { // 中断未被清除，继续发送,确保中断能被Host接收
+            printk(KERN_INFO "host is not ready, intrVal=%x\n", intrVal);
+            RWreg(MSI_CLEAR, MSI_BIT, 1); // clear msi interrupt
+            RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
+            RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
+        }
+    }
+
     while(1) {
         wait_event_interruptible(my_wait_queue, Intr_condition);
 
-        RWreg(0x820000d0, 0x96969694, 1);         // increase cnt 
-        readVal = RWreg(0x820000d0, 0x00, 0);         // read cnt 
+        RWreg(MSI_COUNT, 0x96969694, 1);         // increase cnt 
+        readVal = RWreg(MSI_COUNT, 0x00, 0);         // read cnt 
 
 
-        intrVal = RWreg(0x82000070, 0x00, 0);          
+        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);          
         if(intrVal == 0x00) { // 中断已经被清除，发送中断 
             udelay(1);
             RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
             RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
             // printk(KERN_ERR "send msi intr, cnt=%d\n", readVal);
+        }else {
+            printk(KERN_ERR "msi not clear, cnt=%d\n", readVal);
         }
 
         Intr_condition = 0;
@@ -237,9 +263,9 @@ static int send_thread(void *data){// write to ddr and send interrupt
         send_condition=0;
         // 处理发送队列中的数据包
         while (tx_queue_head != tx_queue_tail) {
-            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(1)); // TODO 留1ms来写入ddr
+            mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(50)); // TODO 留足时间保证写入ddr完成，防止写一半就发中断
             skb = tx_queue[tx_queue_head];
-            if(!skb){
+            if(!skb) {
                 printk(KERN_ERR "error skb is null, tx queue head=%d\n",tx_queue_head);
             }
 
@@ -261,7 +287,7 @@ static int send_thread(void *data){// write to ddr and send interrupt
             }
             
             // printk(KERN_ERR "send thread send skb, send_thread_offst=%x,tx_queue_head=%x\n",send_thread_offst,tx_queue_head);
-            send_thread_offst = (send_thread_offst+MTU_SIZE)%RINGBUFFER_SIZE;
+            send_thread_offst = (send_thread_offst + MTU_SIZE)%RINGBUFFER_SIZE;
             // printk(KERN_ERR "after change send_thread_offst, send_thread_offst=%x,tx_queue_head=%x\n",send_thread_offst,tx_queue_head);
 
             if(++sendNum == MAX_SKBUFFS){
@@ -404,8 +430,8 @@ static netdev_tx_t mytun_start_xmit(struct sk_buff *skb, struct net_device *dev)
     if (tx_queue_tail  == tx_queue_head) {
         // 停止发送队列，防止上层继续调用 start_xmit
         printk(KERN_ERR "error queue is full, stop send\n");
-        netif_stop_queue(dev);
-        return NETDEV_TX_BUSY;// 让上层暂停调用
+        // netif_stop_queue(dev);
+        // return NETDEV_TX_BUSY;// 让上层暂停调用
     }
 
     send_condition = 1;
@@ -596,11 +622,16 @@ static int write_ddr(struct sk_buff *skb,uint64_t offst,int write_size){
             *(unsigned int *)(vaddr + Page_index) = *((unsigned int *)(skb->data + index));
         }
 #if 1 /* 写完一个包后把这个包后面的数据置0,需要在清除缓存操作之前执行 */
-        memset(vaddr + Page_index, 0x00, 10);
+if(Page_index == write_size){
+    // printk(KERN_ERR "offset=%x, Page_index=%x\n",offst, Page_index);
+    memset(vaddr + Page_index, 0x00, 20);
+} else {
+    // printk(KERN_ERR "error offset=%x, Page_index=%x, write_size=%x, cur_size=%x\n",offst, Page_index, write_size, currentSize);
+}
 #endif
         mb();  // Memory barrier before write
         // flush_dcache_page(page);             // 清除缓存，使得ddr数据真正写入
-        flush_dcache(vaddr, PAGE_SIZE + 10);
+        flush_dcache(vaddr, PAGE_SIZE + 64);
         mb();  // Memory barrier after write
         // 取消映射页
         kunmap(page);
@@ -682,7 +713,7 @@ static int read_ddr(uint64_t offst,int read_size){// read_size>PAGE_SIZE   TODO 
             if(index == 0) { // 每个包读取后清除开头
                 *(volatile uint64_t *)(vaddr + Page_index) = 0x00;
                 flush_dcache(vaddr + Page_index, READ_ALIGN);
-                #if 1
+                #if 0
                     u_int64_t tem;
                     tem = *(volatile uint64_t *)(vaddr + Page_index);
                     printk(KERN_ERR "test clear, read data=%llx\n",tem);
