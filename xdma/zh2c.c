@@ -43,8 +43,8 @@ extern "C"
 #define MHYTUN_DEV_NAME "veth_net0"
 #define MHYTUN_IP_ADDR "192.168.1.2"
 #define MHYTUN_NETMASK "255.255.255.0"
-#define MHYTUN_MAC_ADDR {0x02, 0x11, 0x22, 0x33, 0x44, 0x55}
-#define FPGATUN_MAC_ADDR {0x02, 0x11, 0x22, 0x33, 0x44, 0x56}
+#define MHYTUN_MAC_ADDR   {0x02, 0x11, 0x22, 0x33, 0x44, 0x55}
+#define FPGATUN_MAC_ADDR  {0x02, 0x11, 0x22, 0x33, 0x44, 0x56}
 #define ONE_GB 0x40000000
 #define PCIE_DEV_H2C "/dev/xdma0_h2c_0"
 #define PCIE_DEV_C2H "/dev/xdma0_c2h_0"
@@ -98,9 +98,8 @@ extern "C"
     unsigned char *msiData;
     unsigned char *update_magic_num;
     loff_t intrPos = 0x82000040;
-    loff_t msiTest = 0x82000078;
+    loff_t msiClear = 0x82000078;
     loff_t msiCnt = 0x820000d0;
-    loff_t msiClear = 0x82000070;
     loff_t msiReq = 0x82000068;
     loff_t updateCnt = 0x82000054;
     loff_t updateAck = 0x82000044;
@@ -155,7 +154,7 @@ extern "C"
     // 通知处理函数
     static int my_notifier_call(struct notifier_block *nb, unsigned long action, void *data)
     { // 等待中断处理函数通知,然后唤醒读取ddr的线程
-        // printk(KERN_ERR "debug: Notification received!, data:%s\n",(char*)data);
+        //printk(KERN_INFO "debug: Notification received!, data:%s\n",(char*)data);
         if(Intr_condition == 0) {
             Intr_condition = 1;
             wake_up_interruptible(&my_wait_queue);
@@ -190,13 +189,13 @@ extern "C"
         // 收到包后重置定时器，数量达到MAX则调用Callback，和超时处理一样
         // Transmit packet logic here
         struct iphdr *iph_xmit = (struct iphdr *)(skb_network_header(skb));
-        if (iph_xmit->saddr == 0 && iph_xmit->daddr != 0xd18a8c0 && iph_xmit->daddr != 0xc18a8c0)
+        if (iph_xmit->saddr == 0 || (iph_xmit->daddr != 0xd18a8c0 && iph_xmit->daddr != 0xc18a8c0))
         {
-            // printk(KERN_ERR "start xmit: error saddr=%x, daddr=%x\n",iph_xmit->saddr, iph_xmit->daddr);
+            printk(KERN_ERR "start xmit: error saddr=%x, daddr=%x\n",iph_xmit->saddr, iph_xmit->daddr);
             return NETDEV_TX_OK;
         }
 
-        // printk(KERN_ERR "debug: iph_xmit->daddr:0x%x, iph_xmit->saddr:0x%x,skb->len:%x,skb->protocol:%x\n",iph_xmit->daddr,iph_xmit->saddr,skb->len,skb->protocol);
+        // printk(KERN_INFO "debug: iph_xmit->daddr:0x%x, iph_xmit->saddr:0x%x,skb->len:%x,skb->protocol:%x\n",iph_xmit->daddr,iph_xmit->saddr,skb->len,skb->protocol);
 
         if (skb_count[sgl_current] < MAX_SKBUFFS)
         {
@@ -205,10 +204,8 @@ extern "C"
 
             pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
             // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
-            if (skb_count[sgl_current] == MAX_SKBUFFS){
-                printk(KERN_ERR "skb count is full\n");
+            if (skb_count[sgl_current] == MAX_SKBUFFS)
                 mod_timer(&my_timer, jiffies - 1); // 立即超时，自动调用回调函数
-            }
             else
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
 
@@ -245,9 +242,9 @@ extern "C"
         updateSync[1] = 0xFF;
         updateSync[2] = 0xFF;
         updateSync[3] = 0xFF;
-        ret = kernel_write(g_stpcidev.h2c0, updateSync, 4, &updateCnt); // sync msi count 
+        ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, updateSync, 4, &updateCnt);// sync msi count 
         printk(KERN_ERR "send sync intr\n");
-        ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos); // send inter
+        ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, intrBuf, 4, &intrPos); // send inter
         while(updateSync[0] != 0x00){
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, updateSync, 4, &updateCnt); 
         }
@@ -255,8 +252,9 @@ extern "C"
         updateSync[1] = 0x00;
         updateSync[2] = 0x00;
         updateSync[3] = 0x00;
-        ret = kernel_write(g_stpcidev.h2c0, updateSync, 4, &updateCnt); // clear msi count 
+        ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, updateSync, 4, &updateCnt); // clear msi count 
         printk(KERN_ERR "sync ringbuffer success\n");
+        kfree(updateSync);
     }
 
     static int mytun_rx_handler(
@@ -286,20 +284,24 @@ extern "C"
         update_magic_num[1] = 0x69;
         update_magic_num[2] = 0x69;
         update_magic_num[3] = 0x69;
-        while (1)
+        while (!kthread_should_stop())
         {
             wait_event_interruptible(my_wait_queue, write_condition);
             if (skb_count[sgl_current] == 0)
             {
+                write_condition = 0;
                 printk(KERN_ERR "error send_thread: skb_count[sgl_current]=0,skb_count[1-sgl_current]=%x\n", skb_count[1-sgl_current]);
-                continue;
+                continue;//break;
             }
-            // printk(KERN_ERR "send thread ready to send skb count:%d\n",skb_count[sgl_current]);
-            sgl_current = 1 - sgl_current; // 设置current改变，现在就可以开始接收
+            // printk(KERN_INFO "send thread ready to send skb count:%d\n",skb_count[sgl_current]);
+            if(skb_count[1-sgl_current] > 0) // TODO 不知道什么原因会在进入这里
+                printk(KERN_ERR "error send_thread skb_count[sgl_current] = %d\n", skb_count[sgl_current]);
+            else
+                sgl_current = 1 - sgl_current; // 设置current改变，现在就可以开始接收
 
             pci_send(xcdev, xdev, offst);
 
-            printk(KERN_ERR "send end, offst=%x\n",offst);
+            // printk(KERN_ERR "send end, offst=%x\n",offst);
             offst += PACK_SIZE;
             if (offst >= (RINGBUFFER_SIZE + H2C_OFFSET))
             {
@@ -311,21 +313,27 @@ extern "C"
                 kfree_skb(pstskb_array[1 - sgl_current][skb_count[1 - sgl_current]]); // TODO 是不是不用释放
             }
 
-            ret = kernel_write(g_stpcidev.h2c0, update_magic_num, 4, &updateCnt); // increase cnt
+            ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, update_magic_num, 4, &updateCnt); // increase cnt
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateAck);
             if ((IntrAck[0] >> 4) == 0x0)
             {   /* 中断已经被清除,发送新的中断 */
-                ret = kernel_write(g_stpcidev.h2c0, intrBuf, 4, &intrPos); 
-                printk(KERN_ERR "send inter\n");
+                //printk(KERN_INFO "send update\n");
+                ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);
             }
-            
+            else
+            {
+                printk(KERN_INFO "update intr hasn't been cleared\n");
+            }
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateCnt);
-            printk(KERN_ERR "update cnt=%x,%x,%x,%x\n", IntrAck[0], IntrAck[1], IntrAck[2], IntrAck[3]);
+            printk(KERN_ERR "update cnt=%x,%x\n", IntrAck[0], IntrAck[1]);
 
             skb_count[1 - sgl_current] = 0;
             write_condition = 0;
         }
-        // never reach
+
+        kfree(intrBuf);
+        kfree(IntrAck);
+        kfree(update_magic_num);
         return 0;
     }
 
@@ -342,9 +350,12 @@ extern "C"
         msiData[1] = 0x00;
         msiData[2] = 0x00;
         msiData[3] = 0x00;
-        while (1)
+        while (!kthread_should_stop())
         { // 等待被唤醒，读取中断寄存器，改变ringbuffer指针,若ringbuffer为空，通知read
             wait_event_interruptible(my_wait_queue, Intr_condition);
+            /* 留足处理一次中断的时间，防止被打断
+            但是这样会导致没有发送数据时这里也会导致超时，所以这里只能先设置为足够大的时间，暂时为一天 */
+            mod_timer(&msi_timer, jiffies + MS_TO_JIFFIES(3600*24*1000)); 
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, msiIndex, 4, &msiCnt);
             if (msiIndex[3] == 0x80)
             {
@@ -353,28 +364,25 @@ extern "C"
                 msiIndex[0] = 0x00;
                 msiIndex[1] = 0x00;
                 msiIndex[2] = 0x00;
-                ret = kernel_write(g_stpcidev.h2c0, msiIndex, 3, &msiCnt); // clear msi count 
+                ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, msiIndex, 4, &msiCnt); // clear msi count 
                 ringbuffer->bRdIx = 0;
                 ringbuffer->bWrIx = 0;
             }
             else
             {
                 readMsi = (msiIndex[1] << 8) | msiIndex[0];
-                printk(KERN_ERR "readMsi=%x\n", readMsi);
-                // printk(KERN_ERR "msiIndex=%x,%x,%x,%x,readMsi=%x, preIndex=%x\n", msiIndex[0], msiIndex[1], msiIndex[2], msiIndex[3], readMsi, preIndex);
                 if (readMsi >= preIndex)
                     currentIndex = readMsi - preIndex;
                 else
                     currentIndex = readMsi + (0xFFFF - preIndex + 1);
 
-                preIndex = readMsi;
                 ringbuffer->bWrIx += currentIndex;
                 ringbuffer->bWrIx &= ringbuffer->bMax;
-                printk(KERN_ERR "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x, currentIndex = %x\n", ringbuffer->bWrIx, ringbuffer->bRdIx, currentIndex);
-                if (((ringbuffer->bRdIx + currentIndex) & ringbuffer->bMax) == ringbuffer->bWrIx)
+                // printk(KERN_INFO "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x, currentIndex = %x\n", ringbuffer->bWrIx, ringbuffer->bRdIx, currentIndex);
+                if (currentIndex > 0 &&(((ringbuffer->bRdIx + currentIndex) & ringbuffer->bMax) == ringbuffer->bWrIx))
                 { // TODO
                     if(read_condition == 0) {
-                        printk(KERN_ERR "debug Intr_thread: ringbuffer is empty wake up read\n");
+                       // printk(KERN_INFO "debug Intr_thread: ringbuffer is empty wake up read\n");
                         read_condition = 1;
                     } else {
                         printk(KERN_ERR "error: read_condition is not 0\n");
@@ -382,11 +390,20 @@ extern "C"
                     wake_up_interruptible(&my_wait_queue);
                 }
             }
-            ret = kernel_write(g_stpcidev.h2c0, msiData, 4, &msiTest); // clear msi inter
+            ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, msiData, 4, &msiClear); // clear msi inter
             Intr_condition = 0;
-            mod_timer(&msi_timer, jiffies + MS_TO_JIFFIES(msi_interval_ms));
-            printk(KERN_ERR "clear msi inter\n");
+            // printk(KERN_INFO "readMsi=%x\n", readMsi);
+            // printk(KERN_ERR "msiIndex=%x,%x,%x,%x,readMsi=%x, preIndex=%x\n", msiIndex[0], msiIndex[1], msiIndex[2], msiIndex[3], readMsi, preIndex);
+            if(preIndex != readMsi){
+                mod_timer(&msi_timer, jiffies + MS_TO_JIFFIES(msi_interval_ms));
+            } else if(preIndex == 0) {
+                printk(KERN_INFO "arm is ready\n");
+            }
+            preIndex = readMsi;
+            // printk(KERN_INFO "clear msi inter\n");
         }
+        kfree(msiData);
+        kfree(msiIndex);
         return 0;
     }
 
@@ -405,7 +422,7 @@ extern "C"
             return -ENODEV;
         }
 
-        while (1)
+        while (!kthread_should_stop())
         {
             wait_event_interruptible(my_wait_queue, read_condition);
             read_condition = 0;
@@ -424,7 +441,7 @@ extern "C"
                     ddr_skb->dev = mydev;
                     // configSKB(ddr_skb, skb_data, false);
                     // printk(KERN_ERR "read offset=%x\n",offst);
-                    ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, skb_data, MTU_SIZE, &offst);
+                    ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, skb_data, MTU_SIZE, &offst);// 需要清除缓存？
                     if (ret <= 0) {
                         printk(KERN_ERR "Rx-thread read ddr error,ret=%x\n", ret);
                         index--;
@@ -445,17 +462,18 @@ extern "C"
                         {
                             if (ddr_skb->data[1] == 0xff || ddr_skb->data[1] == 0x00)
                             {
-                                printk(KERN_ERR "data is null index=%d, offset=%llx\n",index, (offst - index * MTU_SIZE) + MTU_SIZE);
-                                index--;
-                                break;
-                            }
 #if 0
                             iph = (struct iphdr *)(skb_network_header(ddr_skb));
                             if(iph)
-                                printk(KERN_ERR "Receive-thread Protocol:%d, len:%d, ipsaddr:%x, daddr:%x\n",iph->protocol, ddr_skb->len, iph->saddr, iph->daddr); 
+                                printk(KERN_ERR "data is null Protocol:%d, len:%d, ipsaddr:%x, daddr:%x\n",iph->protocol, ddr_skb->len, iph->saddr, iph->daddr); 
                             else
-                                printk(KERN_ERR "debug Receive-thread iph is null");
+                                printk(KERN_ERR "debug Receive-thread data is null");
 #endif
+                                // printk(KERN_ERR "data is null index=%d, baseoffset=%llx, nulloffset=%llx, %x,%x\n", index-1, (offst - index * MTU_SIZE) + MTU_SIZE, offst,ddr_skb->data[0], ddr_skb->data[1]);
+                                index--;
+                                break;
+                            }
+
                             // printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
                             // printk(KERN_ERR "netif_rx run success\n");
                         }
@@ -489,7 +507,8 @@ extern "C"
                 ringbuffer->bRdIx &= ringbuffer->bMax;
             }
         }
-        // never reach
+
+
         return 0;
     }
 
@@ -519,13 +538,13 @@ extern "C"
 
     static void Msi_Timer(struct timer_list *timer){
         if(Intr_condition == 0) {
-            printk(KERN_ERR "msi timer wake up Intr_thread\n");
+            printk(KERN_INFO "msi timer wake up Intr_thread\n");
             Intr_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
         else
             printk(KERN_ERR "error: msi timer Intr_condition is not 0\n");
-        return NOTIFY_OK;
+        return;
     }
 
     static void Timer_Callback(struct timer_list *timer)
@@ -537,13 +556,14 @@ extern "C"
         // printk(KERN_ERR "ready wake skb_count[sgl_current]:%d\n",skb_count[sgl_current]);
         if (skb_count[1 - sgl_current] == 0&&write_condition == 0)
         { // 上一个数据包已经发送完成 TODO
-            printk(KERN_ERR "mytimer Call back skb_count = %d\n", skb_count[sgl_current]);
+            // printk(KERN_ERR "mytimer Call back skb_count = %d\n", skb_count[sgl_current]);
             write_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
         else
         {
             printk(KERN_ERR "error last pack is sending skb_count[1-sgl_current]=%d, skb_count[sgl_current] = %d, write_condition=%d\n", skb_count[1 - sgl_current], skb_count[sgl_current], write_condition);
+            wake_up_interruptible(&my_wait_queue);
         }
         return;
     }
@@ -558,21 +578,29 @@ extern "C"
         {
             sg_set_buf(&sgl[1 - sgl_current][i], pstskb_array[1 - sgl_current][i]->data, MTU_SIZE); // pstskb_array[1-sgl_current][i]->len
         }
-        printk(KERN_ERR "before, %x\n", skb_count[1 - sgl_current]);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
         nents = pci_map_sg(pdev, sgl[1 - sgl_current], skb_count[1 - sgl_current], DMA_TO_DEVICE);
+#else
+	nents = dma_map_sg(&pdev->dev, sgl[1-sgl_current], skb_count[1-sgl_current], DMA_TO_DEVICE);
+#endif
         if (nents == 0)
         {
             printk(KERN_ERR "pci_send Failed to map scatterlist\n");
             return 1;
         }
-        printk(KERN_ERR "after\n");
         // 设置 sg_table
         sgt.sgl = sgl[1 - sgl_current];
         sgt.nents = nents;
         sgt.orig_nents = skb_count[1 - sgl_current];
         my_xdma_xfer_submit(xdev, 0, offst, &sgt, 0);
 
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
         pci_unmap_sg(pdev, sgt.sgl, sgt.orig_nents, DMA_TO_DEVICE);
+#else
+	dma_unmap_sg(&pdev->dev, sgt.sgl, sgt.orig_nents, DMA_TO_DEVICE);
+#endif
         // printk(KERN_ERR "pci_send: xdma_xfer_submit, offst=%llx\n",offst);
         // xdma_xfer_submit(xdev,0,1,offst,&sgt,1,10000);
         return 0;
@@ -668,7 +696,7 @@ extern "C"
         g_stmytundev->netdev_ops = &mytun_netdev_ops;
         g_stmytundev->flags |= IFF_NOARP;
         g_stmytundev->features |= NETIF_F_IP_CSUM; // NETIF_F_NO_CSUM;
-        memcpy(g_stmytundev->dev_addr, mhy_mac_src, ETH_ALEN);
+        //memcpy(g_stmytundev->dev_addr, mhy_mac_src, ETH_ALEN);
 
         strcpy(stifrtest.ifr_name, MHYTUN_DEV_NAME);
         stifrtest.ifr_flags = IFF_UP;
@@ -680,18 +708,24 @@ extern "C"
         if (err)
         {
             printk(KERN_ERR "register error,ret=%x\n", err);
-            return err;
-        }
-
-        rtnl_lock();
-        if (dev_change_flags(g_stmytundev, IFF_UP, NULL) < 0)
-        {
             free_netdev(g_stmytundev);
             return err;
         }
 
+        rtnl_lock();
+  //          printk(KERN_ERR "before falg\n");
+#if 0
+        if (dev_change_flags(g_stmytundev, IFF_UP, NULL) < 0)
+        {
+            printk(KERN_ERR "change flag error,ret=%x\n", err);
+            free_netdev(g_stmytundev);
+            return err;
+        }
+#endif
+
         if (netif_running(g_stmytundev))
         {
+            printk(KERN_ERR "running error\n");
             netif_stop_queue(g_stmytundev);
             dev_close(g_stmytundev);
         }
@@ -820,7 +854,9 @@ extern "C"
     static void __exit mytun_exit(void)
     {
         dev_remove_pack(&mytun_packet_type);
-        dev_remove_pack(&pci_packet_type);
+        //dev_remove_pack(&pci_packet_type);
+
+        printk(KERN_INFO "mytun_exit\n");
         pcie_close();
         // sgl free
         int sgli = 0;
@@ -830,15 +866,16 @@ extern "C"
         }
 
         // dev_put(g_stpcidev);
-        unregister_netdev(g_stmytundev);
-        free_netdev(g_stmytundev);
+//        unregister_netdev(g_stmytundev);
+//        free_netdev(g_stmytundev);
         del_timer(&my_timer);
         del_timer(&msi_timer);
+
         if (send_thread)
         {
             kthread_stop(send_thread);
         }
-
+        
         if (receive_thread)
         {
             kthread_stop(receive_thread);
@@ -850,6 +887,15 @@ extern "C"
         }
 
         Cl2FifoRemoveFifo(ringbuffer);
+        
+        printk(KERN_INFO "mytun_exit5\n");
+        netif_stop_queue(g_stmytundev);
+        printk(KERN_INFO "mytun_exit6\n");
+        //dev_close(g_stmytundev);
+        printk(KERN_INFO "mytun_exit7\n");
+        unregister_netdev(g_stmytundev);
+        printk(KERN_INFO "mytun_exit8\n");
+        free_netdev(g_stmytundev);
         printk(KERN_INFO "TUN device removed: %s\n", MHYTUN_DEV_NAME);
     }
 
@@ -857,7 +903,7 @@ extern "C"
     module_exit(mytun_exit);
 
     MODULE_LICENSE("GPL");
-    MODULE_AUTHOR("Your Name");
+    MODULE_AUTHOR("NPC Tek");
 #ifdef __cplusplus
 }
 #endif
