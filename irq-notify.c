@@ -200,7 +200,7 @@ static int notify_thread(void *data){
 			last_cnt = update_count & 0xFFFF;
 			ringbuffer->bWrIx = (ringbuffer->bWrIx + current_cnt) & ringbuffer->bMax;
 			// printk(KERN_ERR "ringbuffer->bWrIx=%2lx,ringbuffer->bRdIx=%2lx\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
-			printk(KERN_INFO "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);
+			// printk(KERN_INFO "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);
 			// printk(KERN_ERR "current_cnt=%lx,last_cnt=%lx,update_cnt=%lx\n",current_cnt, last_cnt, update_count);
 			if (((ringbuffer->bRdIx + current_cnt) & ringbuffer->bMax) == ringbuffer->bWrIx) {
 				// printk(KERN_INFO "send notify\n");

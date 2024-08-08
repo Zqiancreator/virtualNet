@@ -72,12 +72,12 @@ extern "C" {
 #define MSI_INTERRUPT           0x82000068
 #define MSI_CHECK_CLEAR         0x82000070
 #define MSI_COUNT               0x820000d0
-#define UPDATE_CNT	            0x82000054	
+#define UPDATE_CNT	            0x82000054
 #define MSI_CLEAR               0x82000078
 #define MAC_OFFSET              0 // 14
 #define RING_BUFF_DEPTH         6           // ringbuff中含有1<<RING_BUFF_DEPTH 个PACKAGE
 #define QUEUE_SIZE              100
-#define TIME_OUT                5
+#define TIME_OUT                3
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define READ_ALIGN              8
 #define MSI_BIT                 0x04
@@ -112,7 +112,7 @@ struct sk_buff *ddr_skb;
 unsigned char *skb_data;
 
 struct net_device *mydev;
-static spinlock_t tx_lock;
+//static spinlock_t tx_lock;
 static int tx_queue_head = 0;
 static int tx_queue_tail = 0;
 static struct sk_buff *tx_queue[QUEUE_SIZE];
@@ -122,7 +122,7 @@ static unsigned long timer_interval_ms = TIME_OUT; // 定时器间隔（毫秒�
 uint64_t send_thread_offst=0;
 unsigned int sendNum = 0;
 
-#if 1 /*计时每阶段耗时*/
+#if 0 /*计时每阶段耗时*/
     ktime_t start, end;
     ktime_t start2, end2;
     ktime_t start3, end3;
@@ -198,8 +198,9 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
     }
 
     static void syncRingbuffer(){
-        int ret;
+        //int ret;
         unsigned int msiCount = 0;
+
         RWreg(UPDATE_CNT, 0x80000000, 1);         // set msi count
         RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
         RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
@@ -208,7 +209,7 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
             RWreg(0x820000d0, 0x00, 0);         // read msi count 
         }
         RWreg(0x820000d0, 0x00, 1);         // clear msi count
-        printk(KERN_ERR "sync ringbuffer success\n");
+        printk(KERN_INFO "sync ringbuffer success\n");
     }
 
 static int intr_thread(void *data){
@@ -219,46 +220,47 @@ static int intr_thread(void *data){
 
     RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
     RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
-    while(1) {
-        ssleep(10);
-        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);          
+    while(!kthread_should_stop()) {
+        ssleep(5);
+        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);
         if(intrVal == 0x00) { // 中断已经被清除，结束 
             printk(KERN_INFO "host has received intr\n");
             break;
-        } else { // 中断未被清除，继续发送,确保中断能被Host接收
-            printk(KERN_INFO "host is not ready, intrVal=%x\n", intrVal);
+        }else { // 中断未被清除，继续发送,确保中断能被Host接收
+            printk(KERN_INFO "host is not ready\n");
             RWreg(MSI_CLEAR, MSI_BIT, 1); // clear msi interrupt
-            RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
+            RWreg(MSI_INTERRUPT, MSI_BIT, 1); // write msi interrupt
             RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
         }
     }
 
-    while(1) {
+    while(!kthread_should_stop()) {
         wait_event_interruptible(my_wait_queue, Intr_condition);
 
         RWreg(MSI_COUNT, 0x96969694, 1);         // increase cnt 
         readVal = RWreg(MSI_COUNT, 0x00, 0);         // read cnt 
 
-
-        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);          
+        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);
         if(intrVal == 0x00) { // 中断已经被清除，发送中断 
-            udelay(1);
-            RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
+            //udelay(1); //
+            RWreg(MSI_INTERRUPT, MSI_BIT, 1); // write msi interrupt
             RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
-            // printk(KERN_ERR "send msi intr, cnt=%d\n", readVal);
+            // printk(KERN_INFO "send msi intr, cnt=%d\n", readVal);
         }else {
-            printk(KERN_ERR "msi not clear, cnt=%d\n", readVal);
+            // printk(KERN_ERR "msi not clear, cnt=%d\n", readVal);
         }
 
         Intr_condition = 0;
-    }     
+    }
+    return 0;
 }
 /*******************************************************************************
                        Local function implementations                         
 *******************************************************************************/
 static int send_thread(void *data){// write to ddr and send interrupt
     struct sk_buff *skb;
-    while(1){
+
+    while(!kthread_should_stop()){
         wait_event_interruptible(my_wait_queue, send_condition);
         send_condition=0;
         // 处理发送队列中的数据包
@@ -327,13 +329,15 @@ static int send_thread(void *data){// write to ddr and send interrupt
         }
         
     }
+    return 0;
 }
 
 static int read_thread(void *data)
 {// 一直等待直到收到buffer为空的消息
     static uint64_t read_offset = 0;
-    int ret;
-    struct iphdr *iph;// debug, check header
+    //int ret;
+    //struct iphdr *iph;// debug, check header
+
     read_offset = ringbuffer->bRdIx*PACK_SIZE;// TODO
     mydev = dev_get_by_name(&init_net, MHYTUN_DEV_NAME);
     if (!mydev) {
@@ -341,7 +345,7 @@ static int read_thread(void *data)
         return -ENODEV;
     }
 
-    while(1) {
+    while(!kthread_should_stop()) {
         wait_event_interruptible(my_wait_queue, read_condition);
         read_condition = 0;
         while(ringbuffer->bRdIx != ringbuffer->bWrIx) {
@@ -480,7 +484,7 @@ static int pci_rx_handler(
 {// 收到的数据直接发到上层ip层
 
     return NET_RX_SUCCESS;
-
+#if 0
     struct iphdr *iph; 
     struct ethhdr *eth;
     if(pstskb->protocol==0xdd86)// 忽略ipv6包
@@ -515,6 +519,7 @@ static int pci_rx_handler(
     
     return NET_RX_SUCCESS;
     return NET_RX_DROP;
+#endif
 }
 
 static unsigned int RWreg(unsigned long long BaseAddr, int value, int rw){
@@ -586,13 +591,14 @@ void invalidate_cache(void *start, size_t size) {
 static int write_ddr(struct sk_buff *skb,uint64_t offst,int write_size){
     // write one skb data,假设现在每次写的数量不超过一页，1500<4096 即 write_size < PAGE_SIZE
     unsigned int Page_index = 0;
-    int ret = 0;
+    //int ret = 0;
     unsigned int index = 0;
     int currentSize; // 下一页要写的数据 
-    struct iphdr *iph;
+    //struct iphdr *iph;
     unsigned long pfn;
     void *vaddr;
     struct page *page;
+
     pfn = (WRITE_BASE + offst) >> PAGE_SHIFT;
     Page_index = offst % PAGE_SIZE;
     write_size += Page_index;
@@ -661,14 +667,14 @@ static int read_ddr(uint64_t offst,int read_size){// read_size>PAGE_SIZE   TODO 
     struct page *page;
     void *vaddr;
     unsigned long pfn;  // 计算页帧号
-    uint64_t current_char;
+    //uint64_t current_char;
     unsigned int index=0;
     unsigned int Page_index;
     int TotalSize = 0;
-    int ret = 0;
+    //int ret = 0;
     int currentSize;
     int packNum = 0;
-    struct iphdr *iph; 
+    //struct iphdr *iph; 
     
     pfn = (READ_BASE+offst) >> PAGE_SHIFT;
     Page_index = offst % PAGE_SIZE;
@@ -938,7 +944,7 @@ module_init(mytun_init);
 module_exit(mytun_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
+MODULE_AUTHOR("NPC Tek");
 #ifdef __cplusplus
 }
 #endif
