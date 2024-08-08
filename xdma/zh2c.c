@@ -60,7 +60,7 @@ extern "C"
 #define PCI_VID 0x10EE
 #define PCI_PID 0x9034
 #define SGL_NUM 2
-#define TIME_OUT 5
+#define TIME_OUT 3
 #define MSI_TIME_OUT 6000
 #define MS_TO_JIFFIES(ms) ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH 6
@@ -204,8 +204,10 @@ extern "C"
 
             pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
             // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
-            if (skb_count[sgl_current] == MAX_SKBUFFS)
+            if (skb_count[sgl_current] == MAX_SKBUFFS){
+                printk(KERN_INFO "full skb=%x\n",skb_count[sgl_current]);
                 mod_timer(&my_timer, jiffies - 1); // 立即超时，自动调用回调函数
+            }
             else
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
 
@@ -308,9 +310,11 @@ extern "C"
                 offst = H2C_OFFSET;
             }
 
-            while (--skb_count[1 - sgl_current] >= 0)
+            while (1)
             {
-                kfree_skb(pstskb_array[1 - sgl_current][skb_count[1 - sgl_current]]); // TODO 是不是不用释放
+                kfree_skb(pstskb_array[1 - sgl_current][--skb_count[1 - sgl_current]]); // TODO 是不是不用释放
+                if(skb_count[1 - sgl_current] == 0)
+                    break;
             }
 
             ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, update_magic_num, 4, &updateCnt); // increase cnt
@@ -325,9 +329,8 @@ extern "C"
                 printk(KERN_INFO "update intr hasn't been cleared\n");
             }
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateCnt);
-            printk(KERN_ERR "update cnt=%x,%x\n", IntrAck[0], IntrAck[1]);
+            // printk(KERN_ERR "update cnt=%x,%x\n", IntrAck[0], IntrAck[1]);
 
-            skb_count[1 - sgl_current] = 0;
             write_condition = 0;
         }
 
@@ -538,12 +541,12 @@ extern "C"
 
     static void Msi_Timer(struct timer_list *timer){
         if(Intr_condition == 0) {
-            printk(KERN_INFO "msi timer wake up Intr_thread\n");
+            // printk(KERN_INFO "msi timer wake up Intr_thread\n");
             Intr_condition = 1;
             wake_up_interruptible(&my_wait_queue);
         }
-        else
-            printk(KERN_ERR "error: msi timer Intr_condition is not 0\n");
+        // else
+        //     printk(KERN_ERR "error: msi timer Intr_condition is not 0\n");
         return;
     }
 
@@ -858,6 +861,7 @@ extern "C"
 
         printk(KERN_INFO "mytun_exit\n");
         pcie_close();
+        printk(KERN_INFO "mytun_exit1\n");
         // sgl free
         int sgli = 0;
         for (; sgli < SGL_NUM; sgli++)
@@ -870,6 +874,7 @@ extern "C"
 //        free_netdev(g_stmytundev);
         del_timer(&my_timer);
         del_timer(&msi_timer);
+        printk(KERN_INFO "mytun_exit2\n");
 
         if (send_thread)
         {
