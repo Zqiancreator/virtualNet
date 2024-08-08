@@ -64,7 +64,7 @@ extern "C" {
 #define WRITE_BASE              0x820000000 // 需要写入ddr的物理地址
 #define RINGBUFFER_SIZE         ((1<<RING_BUFF_DEPTH)*PACK_SIZE) 
 #define MEM_SIZE                0x100000      // 内存区域的大小
-#define MAX_SKBUFFS             16              // 单个包中含有的MTU数量 
+#define MAX_SKBUFFS             64              // 单个包中含有的MTU数量 
 #define MTU_SIZE                2000
 #define PACK_SIZE               MAX_SKBUFFS*MTU_SIZE // TODO
 // #define NET_IP_ALIGN            2  // processor.h 中定义为0
@@ -77,7 +77,7 @@ extern "C" {
 #define MAC_OFFSET              0 // 14
 #define RING_BUFF_DEPTH         6           // ringbuff中含有1<<RING_BUFF_DEPTH 个PACKAGE
 #define QUEUE_SIZE              100
-#define TIME_OUT                3
+#define TIME_OUT                1
 #define MS_TO_JIFFIES(ms)       ((ms) * HZ / 1000)
 #define READ_ALIGN              8
 #define MSI_BIT                 0x04
@@ -121,7 +121,9 @@ static unsigned long timer_interval_ms = TIME_OUT; // 定时器间隔（毫秒�
 // sendthread and timer callback
 uint64_t send_thread_offst=0;
 unsigned int sendNum = 0;
-
+// msi cnt
+void __iomem *Msi_vaddr;
+unsigned int Msi_offset;
 #if 0 /*计时每阶段耗时*/
     ktime_t start, end;
     ktime_t start2, end2;
@@ -164,12 +166,6 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
     static int my_notifier_call(struct notifier_block *nb, unsigned long action, void *data)
     {// 等待中断处理函数通知(此时RingBuffer已经为空),然后唤醒读取ddr的线程
         // printk(KERN_ERR "Notification received success!, data:%s\n",(char*)data);
-        if(read_condition == 0) {
-            read_condition = 1;
-            wake_up_interruptible(&my_wait_queue);
-        } else {
-            printk(KERN_ERR "error notify too fast\n");
-        }
         return NOTIFY_OK;
     }
 
@@ -184,17 +180,15 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
                        Inline function implementations                        
 *******************************************************************************/
     static void Timer_Callback(struct timer_list *timer){// 发送中断操作不能在中断处理函数中完成，
-            if(Intr_condition == 0)
-                Intr_condition = 1;
-            // else 
-            //     printk(KERN_ERR "error, send intr too fast\n");
-            wake_up_interruptible(&my_wait_queue);// 唤醒发送中断线程
-            if(sendNum != MAX_SKBUFFS) {
-                send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
-                // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
-            }
-            sendNum = 0;
-            return ;
+        iowrite32(0x96969694, Msi_vaddr + Msi_offset); // increase msi count
+        // int res = ioread32(Msi_vaddr + Msi_offset); // read msi count
+        // printk(KERN_INFO "cnt=%x\n",res);
+        if(sendNum != MAX_SKBUFFS) {
+            send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
+            // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
+        }
+        sendNum = 0;
+        return ;
     }
 
     static void syncRingbuffer(){
@@ -204,54 +198,15 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
         RWreg(UPDATE_CNT, 0x80000000, 1);         // set msi count
         RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
         RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
-        msiCount = RWreg(0x820000d0, 0x00, 0);         // read msi count
+        msiCount = RWreg(MSI_COUNT, 0x00, 0);         // read msi count
         while(msiCount != 0x00){
-            RWreg(0x820000d0, 0x00, 0);         // read msi count 
+            RWreg(MSI_COUNT, 0x00, 0);         // read msi count 
         }
-        RWreg(0x820000d0, 0x00, 1);         // clear msi count
+        RWreg(MSI_COUNT, 0x00, 1);         // clear msi count
         printk(KERN_INFO "sync ringbuffer success\n");
     }
 
-static int intr_thread(void *data){
-    unsigned int readVal, intrVal;
-
-    RWreg(MSI_COUNT, 0x00000000, 1);         // init msi count
-    RWreg(UPDATE_CNT, 0x00000000, 1);         // init update count
-
-    RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
-    RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
-    while(!kthread_should_stop()) {
-        ssleep(5);
-        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);
-        if(intrVal == 0x00) { // 中断已经被清除，结束 
-            printk(KERN_INFO "host has received intr\n");
-            break;
-        }else { // 中断未被清除，继续发送,确保中断能被Host接收
-            printk(KERN_INFO "host is not ready\n");
-            RWreg(MSI_CLEAR, MSI_BIT, 1); // clear msi interrupt
-            RWreg(MSI_INTERRUPT, MSI_BIT, 1); // write msi interrupt
-            RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
-        }
-    }
-
-    while(!kthread_should_stop()) {
-        wait_event_interruptible(my_wait_queue, Intr_condition);
-
-        RWreg(MSI_COUNT, 0x96969694, 1);         // increase cnt 
-        readVal = RWreg(MSI_COUNT, 0x00, 0);         // read cnt 
-
-        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);
-        if(intrVal == 0x00) { // 中断已经被清除，发送中断 
-            //udelay(1); //
-            RWreg(MSI_INTERRUPT, MSI_BIT, 1); // write msi interrupt
-            RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
-            // printk(KERN_INFO "send msi intr, cnt=%d\n", readVal);
-        }else {
-            // printk(KERN_ERR "msi not clear, cnt=%d\n", readVal);
-        }
-
-        Intr_condition = 0;
-    }
+static int intr_thread(void *data) {
     return 0;
 }
 /*******************************************************************************
@@ -259,6 +214,19 @@ static int intr_thread(void *data){
 *******************************************************************************/
 static int send_thread(void *data){// write to ddr and send interrupt
     struct sk_buff *skb;
+    unsigned long long Msi_BaseAddr;
+    RWreg(MSI_COUNT, 0x00000000, 1);         // init msi count
+    RWreg(UPDATE_CNT, 0x00000000, 1);         // init update count
+    Msi_BaseAddr = MSI_COUNT;
+    Msi_offset = Msi_BaseAddr & ~PAGE_MASK;
+    Msi_BaseAddr &= PAGE_MASK;
+    // 使用 ioremap 映射物理地址
+    Msi_vaddr = ioremap(Msi_BaseAddr, PAGE_SIZE);
+    if (!Msi_vaddr) {
+        pr_err("Msi_vaddr Failed to ioremap physical address 0x%llx\n", Msi_BaseAddr);
+        return -ENOMEM;
+    }
+
 
     while(!kthread_should_stop()){
         wait_event_interruptible(my_wait_queue, send_condition);
@@ -280,6 +248,7 @@ static int send_thread(void *data){// write to ddr and send interrupt
             #endif
             // 实际发送数据包 发送一个包
             write_ddr(skb, send_thread_offst, MTU_SIZE);
+            dev_kfree_skb(skb);
             
             // 更新环形缓冲区的读写索引 允许上层继续调用 start_xmit
             tx_queue_head = (tx_queue_head + 1) % QUEUE_SIZE;
@@ -293,48 +262,24 @@ static int send_thread(void *data){// write to ddr and send interrupt
             // printk(KERN_ERR "after change send_thread_offst, send_thread_offst=%x,tx_queue_head=%x\n",send_thread_offst,tx_queue_head);
 
             if(++sendNum == MAX_SKBUFFS){
-                printk(KERN_ERR "full sendNum=%d\n",sendNum);
+                printk(KERN_INFO "full sendNum=%d\n",sendNum);
                 mod_timer(&my_timer, jiffies - 1);// 立即超时，自动调用回调函数发送中断
             }else{
-#if 1
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms)); // 设置下一个包到来的超时时间
-#else /* 不攒包，不用超时 */
-            if(sendNum != MAX_SKBUFFS){ /*把写完的数据后面的数据抹除掉*/
-                unsigned long pfn;
-                void *vaddr;
-                struct page *page;
-                unsigned int Page_index = 0;
-                pfn = (WRITE_BASE + send_thread_offst) >> PAGE_SHIFT;
-                Page_index = send_thread_offst % PAGE_SIZE;
-                page = pfn_to_page(pfn);
-                vaddr = kmap(page);
-                memset(vaddr+Page_index, 0, MTU_SIZE);// TODO 需要清除缓存？
-                kunmap(page);
-
-                send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
-                // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
             }
-            sendNum = 0;
-
-            RWreg(0x82000078, 0x01, 1);         // clear msi interrupt
-            RWreg(MSI_INTERRUPT, 0x01, 1);        // send msi interrupt
-            RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
-            // RWreg(MSI_INTERRUPT, 0x00, 1);        // send msi interrupt
-            // RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
-            printk(KERN_ERR "send msi intr\n");
-#endif
-            }
-
-            dev_kfree_skb(skb);
         }
         
     }
+    iounmap(Msi_vaddr);
     return 0;
 }
 
 static int read_thread(void *data)
 {// 一直等待直到收到buffer为空的消息
     static uint64_t read_offset = 0;
+    uint32_t update_count = 0;
+	uint16_t current_cnt = 0;
+	uint16_t last_cnt = 0;
     //int ret;
     //struct iphdr *iph;// debug, check header
 
@@ -345,22 +290,45 @@ static int read_thread(void *data)
         return -ENODEV;
     }
 
-    while(!kthread_should_stop()) {
-        wait_event_interruptible(my_wait_queue, read_condition);
-        read_condition = 0;
-        while(ringbuffer->bRdIx != ringbuffer->bWrIx) {
-            // printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
-            if(read_ddr(read_offset, PACK_SIZE) == -1) {
-                printk(KERN_ERR "read_thread: read ddr error\n");
-                break; 
-            }
-            // printk(KERN_ERR "read_offset=%x, RINGBUFFER_SIZE=%x\n",read_offset, RINGBUFFER_SIZE);
-            read_offset = (read_offset + PACK_SIZE)%(RINGBUFFER_SIZE);
-            ringbuffer->bRdIx += 1;
-            ringbuffer->bRdIx &= ringbuffer->bMax;
-        }
-    }
-    // never reach
+	while(!kthread_should_stop()){
+        if(current_cnt == 0)
+            msleep(10);
+        msleep(1);
+		update_count = RWreg(UPDATE_CNT, 0x00, 0); // update_cnt
+		if(update_count >= 0x80000000) { // 最高位为1, 同步 TODO
+			printk(KERN_ERR "sync, count = %lx\n", update_count);
+            RWreg(UPDATE_CNT, 0x80000000, 1); // clear update cnt 
+			ringbuffer->bWrIx = 0;
+			ringbuffer->bRdIx = 0;
+		} else {
+			current_cnt = update_count & 0xFFFF;
+			if(current_cnt >= last_cnt) 
+				current_cnt -= last_cnt;
+			else 
+				current_cnt = current_cnt + (0xFFFF - last_cnt + 1);
+
+			if (current > 0) {
+                last_cnt = update_count & 0xFFFF;
+                ringbuffer->bWrIx = (ringbuffer->bWrIx + current_cnt) & ringbuffer->bMax;
+                // printk(KERN_ERR "ringbuffer->bWrIx=%2lx,ringbuffer->bRdIx=%2lx\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
+                // printk(KERN_INFO "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);
+                // printk(KERN_ERR "current_cnt=%lx,last_cnt=%lx,update_cnt=%lx\n",current_cnt, last_cnt, update_count);
+				// printk(KERN_INFO "send notify\n");
+				while(ringbuffer->bRdIx != ringbuffer->bWrIx) {
+                    // printk(KERN_ERR "read read_offset=%x, RdIx=%x, WrIx=%x\n",read_offset, ringbuffer->bRdIx, ringbuffer->bWrIx);
+                    if(read_ddr(read_offset, PACK_SIZE) == -1) {
+                        printk(KERN_ERR "read_thread: read ddr error\n");
+                        break; 
+                    }
+                    // printk(KERN_ERR "read_offset=%x, RINGBUFFER_SIZE=%x\n",read_offset, RINGBUFFER_SIZE);
+                    read_offset = (read_offset + PACK_SIZE)%(RINGBUFFER_SIZE);
+                    ringbuffer->bRdIx += 1;
+                    ringbuffer->bRdIx &= ringbuffer->bMax;
+                }
+			}
+		}
+	}
+
     return 0;
 }
 
@@ -938,6 +906,20 @@ static void __exit mytun_exit(void)
         printk(KERN_ERR "Failed to register notifier: %d\n", ret);
     }
     printk(KERN_INFO "TUN device removed: %s\n", MHYTUN_DEV_NAME);
+    if (Send_thread)
+    {
+        kthread_stop(Send_thread);
+    }
+    
+    if (Read_thread)
+    {
+        kthread_stop(Read_thread);
+    }
+
+    if (Intr_thread)
+    {
+        kthread_stop(Intr_thread);
+    }
 }
 
 module_init(mytun_init);

@@ -216,7 +216,7 @@ static int notify_thread(void *data){
 
 static irqreturn_t irq_interrupt(int irq, void *dev_id)
 {
-	// printk("irq = %d,diff:%d,irq_is_open:%d\n", irq + diff_value,diff_value,irq_is_open);
+	printk("irq = %d,diff:%d,irq_is_open:%d\n", irq + diff_value,diff_value,irq_is_open);
 	if(notify_condition == 0)
 	{
 		notify_condition = 1;
