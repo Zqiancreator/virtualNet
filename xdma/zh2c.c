@@ -51,7 +51,7 @@ extern "C"
 #define H2C_OFFSET 0x800000000
 #define C2H_OFFSET 0x820000000
 #define RINGBUFFER_SIZE ((1 << RING_BUFF_DEPTH) * PACK_SIZE)
-#define MAX_SKBUFFS 16
+#define MAX_SKBUFFS 64 
 #define DEST_HOST_IP 0x0c18a8c0
 #define DEST_CARD_IP 0x0d18a8c0
 #define BOARD_IP 0xff18a8c0
@@ -60,7 +60,7 @@ extern "C"
 #define PCI_VID 0x10EE
 #define PCI_PID 0x9034
 #define SGL_NUM 2
-#define TIME_OUT 3
+#define TIME_OUT 1
 #define MSI_TIME_OUT 6000
 #define MS_TO_JIFFIES(ms) ((ms) * HZ / 1000)
 #define RING_BUFF_DEPTH 6
@@ -155,12 +155,6 @@ extern "C"
     static int my_notifier_call(struct notifier_block *nb, unsigned long action, void *data)
     { // 等待中断处理函数通知,然后唤醒读取ddr的线程
         //printk(KERN_INFO "debug: Notification received!, data:%s\n",(char*)data);
-        if(Intr_condition == 0) {
-            Intr_condition = 1;
-            wake_up_interruptible(&my_wait_queue);
-        }
-        else
-            printk(KERN_ERR "error: Intr_condition is not 0\n");
         return NOTIFY_OK;
     }
     // 定义一个通知块
@@ -205,8 +199,8 @@ extern "C"
             pstskb_array[sgl_current][skb_count[sgl_current]++] = skb;
             // printk(KERN_ERR "skb count:%d\n",skb_count[sgl_current]);
             if (skb_count[sgl_current] == MAX_SKBUFFS){
-                printk(KERN_INFO "full skb=%x\n",skb_count[sgl_current]);
                 mod_timer(&my_timer, jiffies - 1); // 立即超时，自动调用回调函数
+                printk(KERN_INFO "full skb=%d\n",skb_count[sgl_current]);
             }
             else
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms));
@@ -214,6 +208,7 @@ extern "C"
         }
         else
         {
+            printk(KERN_ERR "error, skb_count[sgl_current] = %d\n", skb_count[sgl_current]);
             kfree_skb(skb); // Drop the packet if the array is full
         }
         // dev_kfree_skb(skb);
@@ -318,19 +313,8 @@ extern "C"
             }
 
             ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, update_magic_num, 4, &updateCnt); // increase cnt
-            ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateAck);
-            if ((IntrAck[0] >> 4) == 0x0)
-            {   /* 中断已经被清除,发送新的中断 */
-                //printk(KERN_INFO "send update\n");
-                ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, intrBuf, 4, &intrPos);
-            }
-            else
-            {
-                printk(KERN_INFO "update intr hasn't been cleared\n");
-            }
-            ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, IntrAck, 4, &updateCnt);
-            // printk(KERN_ERR "update cnt=%x,%x\n", IntrAck[0], IntrAck[1]);
-
+            ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, intrBuf, 4, &updateCnt); // increase cnt
+            // printk(KERN_INFO "update cnt=%x,%x\n",intrBuf[0],intrBuf[1]);
             write_condition = 0;
         }
 
@@ -342,23 +326,40 @@ extern "C"
 
     static int Intr_thread(void *data)
     { // 接收中断线程 移动ringbuffer的Write指针，如果ringbuffer为空则通知读ddr线程
-        int ret;
+        return 0;
+    }
+
+    static int Receive_thread(void *data)
+    { // 读取ddr线程 从ddr读取数据后调用rx-handler发送回上层IP层
+        unsigned char *skb_data;
+        struct sk_buff *ddr_skb;
+        struct iphdr *iph;
+        ssize_t ret;
+        int index = 0;
+        loff_t offst = C2H_OFFSET;
         u_int16_t preIndex = 0;
         u_int16_t currentIndex = 0;
         u_int16_t readMsi = 0;
         unsigned char *msiIndex;
+        mydev = dev_get_by_name(&init_net, MHYTUN_DEV_NAME);
+        if (!mydev)
+        {
+            pr_err("Failed to get network device\n");
+            return -ENODEV;
+        }
+
         msiData = kmalloc(sizeof(int) * 4, GFP_KERNEL);
         msiIndex = kmalloc(sizeof(int) * 4, GFP_KERNEL);
         msiData[0] = MSI_BIT;
         msiData[1] = 0x00;
         msiData[2] = 0x00;
         msiData[3] = 0x00;
+        
         while (!kthread_should_stop())
-        { // 等待被唤醒，读取中断寄存器，改变ringbuffer指针,若ringbuffer为空，通知read
-            wait_event_interruptible(my_wait_queue, Intr_condition);
-            /* 留足处理一次中断的时间，防止被打断
-            但是这样会导致没有发送数据时这里也会导致超时，所以这里只能先设置为足够大的时间，暂时为一天 */
-            mod_timer(&msi_timer, jiffies + MS_TO_JIFFIES(3600*24*1000)); 
+        {
+            if(currentIndex == 0)
+                msleep(10);
+            msleep(1);
             ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, msiIndex, 4, &msiCnt);
             if (msiIndex[3] == 0x80)
             {
@@ -379,138 +380,91 @@ extern "C"
                 else
                     currentIndex = readMsi + (0xFFFF - preIndex + 1);
 
-                ringbuffer->bWrIx += currentIndex;
-                ringbuffer->bWrIx &= ringbuffer->bMax;
-                // printk(KERN_INFO "debug Intr_thread: ringbuffer->bWrIx:%x,ringbuffer->bRdIx:%x, currentIndex = %x\n", ringbuffer->bWrIx, ringbuffer->bRdIx, currentIndex);
-                if (currentIndex > 0 &&(((ringbuffer->bRdIx + currentIndex) & ringbuffer->bMax) == ringbuffer->bWrIx))
-                { // TODO
-                    if(read_condition == 0) {
-                       // printk(KERN_INFO "debug Intr_thread: ringbuffer is empty wake up read\n");
-                        read_condition = 1;
-                    } else {
-                        printk(KERN_ERR "error: read_condition is not 0\n");
-                    }
-                    wake_up_interruptible(&my_wait_queue);
-                }
-            }
-            ret = g_stpcidev.h2c0->f_op->write(g_stpcidev.h2c0, msiData, 4, &msiClear); // clear msi inter
-            Intr_condition = 0;
-            // printk(KERN_INFO "readMsi=%x\n", readMsi);
-            // printk(KERN_ERR "msiIndex=%x,%x,%x,%x,readMsi=%x, preIndex=%x\n", msiIndex[0], msiIndex[1], msiIndex[2], msiIndex[3], readMsi, preIndex);
-            if(preIndex != readMsi){
-                mod_timer(&msi_timer, jiffies + MS_TO_JIFFIES(msi_interval_ms));
-            } else if(preIndex == 0) {
-                printk(KERN_INFO "arm is ready\n");
-            }
-            preIndex = readMsi;
-            // printk(KERN_INFO "clear msi inter\n");
-        }
-        kfree(msiData);
-        kfree(msiIndex);
-        return 0;
-    }
-
-    static int Receive_thread(void *data)
-    { // 读取ddr线程 从ddr读取数据后调用rx-handler发送回上层IP层
-        unsigned char *skb_data;
-        struct sk_buff *ddr_skb;
-        struct iphdr *iph;
-        ssize_t ret;
-        int index = 0;
-        loff_t offst = C2H_OFFSET;
-        mydev = dev_get_by_name(&init_net, MHYTUN_DEV_NAME);
-        if (!mydev)
-        {
-            pr_err("Failed to get network device\n");
-            return -ENODEV;
-        }
-
-        while (!kthread_should_stop())
-        {
-            wait_event_interruptible(my_wait_queue, read_condition);
-            read_condition = 0;
-            while (ringbuffer->bRdIx != ringbuffer->bWrIx)
-            {
-                while (index++ < MAX_SKBUFFS)
-                {
-                    ddr_skb = alloc_skb(MTU_SIZE + NET_IP_ALIGN, GFP_KERNEL);
-                    if (!ddr_skb)
+                // if(currentIndex != 0)
+                //     printk(KERN_INFO "debug Recv: bWrIx:%x, bRdIx:%x, currentIndex:%x, readMsi:%x\n", ringbuffer->bWrIx, ringbuffer->bRdIx, currentIndex, readMsi);
+                if (currentIndex > 0)
+                { 
+                    ringbuffer->bWrIx += currentIndex;
+                    ringbuffer->bWrIx &= ringbuffer->bMax;
+                    while (ringbuffer->bRdIx != ringbuffer->bWrIx)
                     {
-                        pr_err("error Failed to allocate ddr_skb\n");
-                        return -ENOMEM;
-                    }
-                    skb_reserve(ddr_skb, NET_IP_ALIGN);
-                    skb_data = skb_put(ddr_skb, MTU_SIZE);
-                    ddr_skb->dev = mydev;
-                    // configSKB(ddr_skb, skb_data, false);
-                    // printk(KERN_ERR "read offset=%x\n",offst);
-                    ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, skb_data, MTU_SIZE, &offst);// 需要清除缓存？
-                    if (ret <= 0) {
-                        printk(KERN_ERR "Rx-thread read ddr error,ret=%x\n", ret);
-                        index--;
-                        break;
-                    }
-
-                    // configSKB(ddr_skb, skb_data, true);
-                    skb_set_network_header(ddr_skb, sizeof(struct ethhdr)); // reset or set
-                    skb_set_transport_header(ddr_skb, sizeof(struct ethhdr) + sizeof(struct iphdr));
-
-                    ddr_skb->protocol = eth_type_trans(ddr_skb, mydev); // 设置协议为IP
-                    ddr_skb->ip_summed = CHECKSUM_UNNECESSARY;
-                    if (ddr_skb)
-                    {
-                        // printk(KERN_ERR "debug Rx-thread ringbuffer->bRead:%x,ringbuffer->bWrIx:%x,offst=%llx,index=%d\n",ringbuffer->bRdIx,ringbuffer->bWrIx,offst,index);
-
-                        if (netif_rx(ddr_skb) == NET_RX_SUCCESS)
+                        while (index++ < MAX_SKBUFFS)
                         {
-                            if (ddr_skb->data[1] == 0xff || ddr_skb->data[1] == 0x00)
+                            ddr_skb = alloc_skb(MTU_SIZE + NET_IP_ALIGN, GFP_KERNEL);
+                            if (!ddr_skb)
                             {
-#if 0
-                            iph = (struct iphdr *)(skb_network_header(ddr_skb));
-                            if(iph)
-                                printk(KERN_ERR "data is null Protocol:%d, len:%d, ipsaddr:%x, daddr:%x\n",iph->protocol, ddr_skb->len, iph->saddr, iph->daddr); 
-                            else
-                                printk(KERN_ERR "debug Receive-thread data is null");
-#endif
-                                // printk(KERN_ERR "data is null index=%d, baseoffset=%llx, nulloffset=%llx, %x,%x\n", index-1, (offst - index * MTU_SIZE) + MTU_SIZE, offst,ddr_skb->data[0], ddr_skb->data[1]);
+                                pr_err("error Failed to allocate ddr_skb\n");
+                                return -ENOMEM;
+                            }
+                            skb_reserve(ddr_skb, NET_IP_ALIGN);
+                            skb_data = skb_put(ddr_skb, MTU_SIZE);
+                            ddr_skb->dev = mydev;
+                            // configSKB(ddr_skb, skb_data, false);
+                            // printk(KERN_ERR "read offset=%x\n",offst);
+                            ret = g_stpcidev.c2h0->f_op->read(g_stpcidev.c2h0, skb_data, MTU_SIZE, &offst);// 需要清除缓存？
+                            if (ret <= 0) {
+                                printk(KERN_ERR "Rx-thread read ddr error,ret=%x\n", ret);
                                 index--;
                                 break;
                             }
 
-                            // printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
-                            // printk(KERN_ERR "netif_rx run success\n");
+                            // configSKB(ddr_skb, skb_data, true);
+                            skb_set_network_header(ddr_skb, sizeof(struct ethhdr)); // reset or set
+                            skb_set_transport_header(ddr_skb, sizeof(struct ethhdr) + sizeof(struct iphdr));
+
+                            ddr_skb->protocol = eth_type_trans(ddr_skb, mydev); // 设置协议为IP
+                            ddr_skb->ip_summed = CHECKSUM_UNNECESSARY;
+                            if (ddr_skb)
+                            {
+                                // printk(KERN_ERR "debug Rx-thread ringbuffer->bRead:%x,ringbuffer->bWrIx:%x,offst=%llx,index=%d\n",ringbuffer->bRdIx,ringbuffer->bWrIx,offst,index);
+
+                                if (netif_rx(ddr_skb) == NET_RX_SUCCESS)
+                                {
+                                    if (ddr_skb->data[1] == 0xff || ddr_skb->data[1] == 0x00 || ddr_skb->data[0] == 0xc5|| ddr_skb->data[0] == 0x17)
+                                    {
+                                        // printk(KERN_ERR "data is null index=%d, baseoffset=%llx, nulloffset=%llx, %x,%x\n", index-1, (offst - index * MTU_SIZE) + MTU_SIZE, offst,ddr_skb->data[0], ddr_skb->data[1]);
+                                        index--;
+                                        break;
+                                    }
+
+                                    // printk(KERN_ERR "debug2 Rx-thread ready send to ip: iph->saddr=%x,iph->daddr=%x,iph->protocol=%x,skb->protocol=%x\n",iph->saddr,iph->daddr,iph->protocol,ddr_skb->protocol);
+                                    // printk(KERN_ERR "netif_rx run success\n");
+                                }
+                                else
+                                {
+                                    kfree_skb(ddr_skb);
+                                    printk(KERN_ERR "Rx-thread netif_rx run error\n");
+                                }
+                            }
+                            else
+                                printk(KERN_ERR "Rx-thread ddr_skb is null");
+
+
+                            offst += MTU_SIZE;
+                            if (offst >= (RINGBUFFER_SIZE + C2H_OFFSET))
+                            {
+                                offst = C2H_OFFSET;
+                            }
                         }
-                        else
+
+                        while (index++ < MAX_SKBUFFS)
                         {
-                            kfree_skb(ddr_skb);
-                            printk(KERN_ERR "Rx-thread netif_rx run error\n");
+                            offst += MTU_SIZE;
+                            if (offst >= (RINGBUFFER_SIZE + C2H_OFFSET))
+                            {
+                                offst = C2H_OFFSET;
+                            }
                         }
-                    }
-                    else
-                        printk(KERN_ERR "Rx-thread ddr_skb is null");
-
-
-                    offst += MTU_SIZE;
-                    if (offst >= (RINGBUFFER_SIZE + C2H_OFFSET))
-                    {
-                        offst = C2H_OFFSET;
+                        index = 0;
+                        ringbuffer->bRdIx += 1;
+                        ringbuffer->bRdIx &= ringbuffer->bMax;
                     }
                 }
-
-                while (index++ < MAX_SKBUFFS)
-                {
-                    offst += MTU_SIZE;
-                    if (offst >= (RINGBUFFER_SIZE + C2H_OFFSET))
-                    {
-                        offst = C2H_OFFSET;
-                    }
-                }
-                index = 0;
-                ringbuffer->bRdIx += 1;
-                ringbuffer->bRdIx &= ringbuffer->bMax;
             }
         }
 
+        kfree(msiData);
+        kfree(msiIndex);
 
         return 0;
     }
@@ -540,13 +494,7 @@ extern "C"
     }
 
     static void Msi_Timer(struct timer_list *timer){
-        if(Intr_condition == 0) {
-            // printk(KERN_INFO "msi timer wake up Intr_thread\n");
-            Intr_condition = 1;
-            wake_up_interruptible(&my_wait_queue);
-        }
-        // else
-        //     printk(KERN_ERR "error: msi timer Intr_condition is not 0\n");
+        
         return;
     }
 
@@ -623,10 +571,6 @@ extern "C"
     int pcie_open(void)
     {
         int status = 0;
-        // mm_segment_t old_fs;
-
-        // old_fs = get_fs();
-        // set_fs(KERNEL_DS);
 
         /* 打开 XDMA Host-to-Card 0 设备 */
         g_stpcidev.h2c0 = filp_open(g_stpcidev.h2c0_path, O_RDWR, S_IRUSR | S_IWUSR);
@@ -647,8 +591,6 @@ extern "C"
         }
         g_stpcidev.h2c0->f_pos = H2C_OFFSET;
         g_stpcidev.c2h0->f_pos = C2H_OFFSET;
-        /* 恢复原始的地址空间 */
-        // set_fs(old_fs);
 
         return status;
 
@@ -657,17 +599,12 @@ extern "C"
             filp_close(g_stpcidev.c2h0, NULL);
         if (!IS_ERR(g_stpcidev.h2c0) && g_stpcidev.h2c0)
             filp_close(g_stpcidev.h2c0, NULL);
-        // set_fs(old_fs); // 确保在任何出口点恢复原始的地址空间
         return status;
     }
 
     // 关闭PCIe设备
     void pcie_close(void)
     {
-        // mm_segment_t old_fs;
-
-        // old_fs = get_fs();
-        // set_fs(KERNEL_DS);
         if (g_stpcidev.c2h0)
             filp_close(g_stpcidev.c2h0, NULL);
         if (g_stpcidev.h2c0)
@@ -676,7 +613,6 @@ extern "C"
             kfree(g_stpcidev.buffer_c2h);
         if (g_stpcidev.buffer_h2c)
             kfree(g_stpcidev.buffer_h2c);
-        // set_fs(old_fs); // 确保在任何出口点恢复原始的地址空间
     }
 
     static int __init mytun_init(void)
@@ -753,32 +689,6 @@ extern "C"
             free_netdev(g_stmytundev);
             return err;
         }
-// 分配新的接口地址结构
-#if 0
-    struct in_ifaddr *ifa;
-    ifa = kzalloc(sizeof(*ifa), GFP_KERNEL);
-    if (!ifa) {
-        err = -ENOMEM;
-        return err;
-    }
-    // 设置接口地址结构
-    ifa->ifa_prefixlen = 24; //  255.255.255.0 的掩码
-    ifa->ifa_address = htonl(in_aton(MHYTUN_IP_ADDR)); //  IP 地址
-    ifa->ifa_local = ifa->ifa_address;
-    ifa->ifa_broadcast = htonl(in_aton(MHYTUN_IP_ADDR)); // 广播地址
-    ifa->ifa_mask = htonl(in_aton(MHYTUN_NETMASK)); // 子网掩码
-
-    printk(KERN_ERR "before add ifa_list\n");
-    // 加入到接口地址列表
-    if(in_dev->ifa_list == NULL){
-        printk(KERN_ERR " ifa_list is null\n");
-        ifa->ifa_next = NULL;
-    }
-    else {
-        printk(KERN_ERR " ifa_list is not null\n");
-        ifa->ifa_next = in_dev->ifa_list;
-    }
-#endif
 
         /* Set up packet handler for PCIe device */
         err = pcie_init();
