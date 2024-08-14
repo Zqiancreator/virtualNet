@@ -80,38 +80,6 @@ static int notify_thread(void *data);
 	}Cl2_Packet_Fifo_Type;
 	Cl2_Packet_Fifo_Type *ringbuffer;
 	EXPORT_SYMBOL(ringbuffer);
-	/*****************************************************************************
-	 Prototype    : Cl2FifoPutPacket
-	Description  : 
-	Input        : 
-	Output       : None
-	Return Value : 
-	Calls        : 
-	Called By    : 
-	
-	History        :
-	1.Date         : 2024/6/13
-		Author       : 
-		Modification : Created function
-
-	*****************************************************************************/
-	void Cl2FifoPutPacket(Cl2_Packet_Fifo_Type *psFifo)
-	{    
-		//u8 bNextWrIx;
-		//u16 delay=0;
-		
-		//printk(KERN_INFO "recv intr\n"); 
-		ioread32(base_address + base_offset);
-		psFifo->bWrIx = (psFifo->bWrIx + 1) & psFifo->bMax;
-		if(notify_condition == 0)
-		{
-			notify_condition = 1;
-			wake_up_interruptible(&thread_wait);
-		}else{
-			printk(KERN_ERR "intr is too fast\n");
-		}
-		/* empty, notify c2h device*/
-	}
 
 	/*****************************************************************************
 	 Prototype    : Cl2FifoCreateFifo
@@ -200,7 +168,7 @@ static int notify_thread(void *data){
 			last_cnt = update_count & 0xFFFF;
 			ringbuffer->bWrIx = (ringbuffer->bWrIx + current_cnt) & ringbuffer->bMax;
 			// printk(KERN_ERR "ringbuffer->bWrIx=%2lx,ringbuffer->bRdIx=%2lx\n",ringbuffer->bWrIx,ringbuffer->bRdIx);
-			// printk(KERN_INFO "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);
+			printk(KERN_INFO "recv intr,total = %lx, cur = %lx\n",update_count, current_cnt);  ////
 			// printk(KERN_ERR "current_cnt=%lx,last_cnt=%lx,update_cnt=%lx\n",current_cnt, last_cnt, update_count);
 			if (((ringbuffer->bRdIx + current_cnt) & ringbuffer->bMax) == ringbuffer->bWrIx) {
 				// printk(KERN_INFO "send notify\n");
@@ -216,7 +184,7 @@ static int notify_thread(void *data){
 
 static irqreturn_t irq_interrupt(int irq, void *dev_id)
 {
-	printk("irq = %d,diff:%d,irq_is_open:%d\n", irq + diff_value,diff_value,irq_is_open);
+	// printk("irq = %d,diff:%d,irq_is_open:%d\n", irq + diff_value,diff_value,irq_is_open);
 	if(notify_condition == 0)
 	{
 		notify_condition = 1;
