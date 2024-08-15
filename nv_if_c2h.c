@@ -226,40 +226,62 @@ extern Cl2_Packet_Fifo_Type* ringbuffer;
 
 static int intr_thread(void *data){
     unsigned int readVal, intrVal;
+    void __iomem *UpdateCnt, *MsiIntr, *MsiEnable, *MsiCheckClear;
+    unsigned int Update_offset, MsiIntr_offset, MsiEnable_offset, MsiCheckClear_offset;
+
 	unsigned long BaseAddr = MSI_COUNT;
     Msi_offset = BaseAddr & ~PAGE_MASK;
     BaseAddr &= PAGE_MASK;
 	Msi_vaddr = ioremap(BaseAddr, PAGE_SIZE);
 
-    RWreg(MSI_COUNT, 0x00000000, 1);         // init msi count
-    RWreg(UPDATE_CNT, 0x00000000, 1);         // init update count
+    BaseAddr = UPDATE_CNT;
+    Update_offset = BaseAddr & ~PAGE_MASK;
+    BaseAddr &= PAGE_MASK;
+    UpdateCnt = ioremap(BaseAddr, PAGE_SIZE);
 
-    RWreg(MSI_INTERRUPT, MSI_BIT, 1);        // write msi interrupt
-    RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
+    BaseAddr = MSI_INTERRUPT;
+    MsiIntr_offset = BaseAddr & ~PAGE_MASK;
+    BaseAddr &= PAGE_MASK;
+    MsiIntr = ioremap(BaseAddr, PAGE_SIZE);
+
+    BaseAddr = MSI_ENABLE;
+    MsiEnable_offset = BaseAddr & ~PAGE_MASK;
+    BaseAddr &= PAGE_MASK;
+    MsiEnable = ioremap(BaseAddr, PAGE_SIZE);
+
+    BaseAddr = MSI_CHECK_CLEAR;
+    MsiCheckClear_offset = BaseAddr & ~PAGE_MASK;
+    BaseAddr &= PAGE_MASK;
+    MsiCheckClear = ioremap(BaseAddr, PAGE_SIZE);
+    iowrite32(0x00000000, Msi_vaddr + Msi_offset);  // init msi count
+    iowrite32(0x00000000, UpdateCnt + Update_offset);        // init update count
+
+    iowrite32(MSI_BIT, MsiIntr + MsiIntr_offset); // write msi interrupt
+    iowrite32(0xabababab, MsiEnable + MsiEnable_offset); // send msi interrupt
     while(!kthread_should_stop()) {
         ssleep(5);
-        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);
+        intrVal = ioread32(MsiCheckClear + MsiCheckClear_offset);
         if(intrVal == 0x00) { // 中断已经被清除，发送中断 
             printk(KERN_INFO "host has received intr\n");
             break;
         }else {
             RWreg(MSI_CLEAR, MSI_BIT, 1); // clear msi interrupt
-            RWreg(MSI_INTERRUPT, MSI_BIT, 1); // write msi interrupt
-            RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
+            iowrite32(MSI_BIT, MsiIntr + MsiIntr_offset); // write msi interrupt
+            iowrite32(0xabababab, MsiEnable + MsiEnable_offset); // send msi interrupt
         }
     }
 
     while(!kthread_should_stop()) {
         wait_event_interruptible(my_wait_queue, Intr_condition);
       //mutex_lock(&my_mutex);
-        readVal = RWreg(MSI_COUNT, 0x00, 0);     // read cnt 
+        readVal = ioread32(Msi_vaddr + Msi_offset);     // read cnt 
       //mutex_unlock(&my_mutex);
-        intrVal = RWreg(MSI_CHECK_CLEAR, 0x00, 0);
+        intrVal = ioread32(MsiCheckClear + MsiCheckClear_offset);
         if(intrVal == 0x00) { // 中断已经被清除，发送中断 
             //udelay(1); //
 		  // mutex_lock(&my_mutex);
-            RWreg(MSI_INTERRUPT, MSI_BIT, 1); // write msi interrupt
-            RWreg(MSI_ENABLE, 0xabababab, 1); // send msi interrupt
+            iowrite32(MSI_BIT, MsiIntr + MsiIntr_offset); // write msi interrupt
+            iowrite32(0xabababab, MsiEnable + MsiEnable_offset); // send msi interrupt
 		  // mutex_unlock(&my_mutex);
             printk(KERN_INFO "send msi intr, cnt=%d\n", readVal);
         }else {
@@ -321,34 +343,8 @@ static int send_thread(void *data){// write to ddr and send interrupt
                     Intr_condition = 1;
                     wake_up_interruptible(&my_wait_queue);// 唤醒发送中断线程
                 }
-            }else{
-#if 1
+            } else {
                 mod_timer(&my_timer, jiffies + MS_TO_JIFFIES(timer_interval_ms)); // 设置下一个包到来的超时时间
-#else /* 不攒包，不用超时 */
-            if(sendNum != MAX_SKBUFFS){ /*把写完的数据后面的数据抹除掉*/
-                unsigned long pfn;
-                void *vaddr;
-                struct page *page;
-                unsigned int Page_index = 0;
-                pfn = (WRITE_BASE + send_thread_offst) >> PAGE_SHIFT;
-                Page_index = send_thread_offst % PAGE_SIZE;
-                page = pfn_to_page(pfn);
-                vaddr = kmap(page);
-                memset(vaddr+Page_index, 0, MTU_SIZE);// TODO 需要清除缓存？
-                kunmap(page);
-
-                send_thread_offst = (send_thread_offst+(MAX_SKBUFFS-sendNum)*MTU_SIZE)%RINGBUFFER_SIZE;
-                // printk(KERN_ERR "not full sendNum=%d, after change send_thread_offst=%x\n",sendNum, send_thread_offst);
-            }
-            sendNum = 0;
-
-            RWreg(0x82000078, 0x01, 1);         // clear msi interrupt
-            RWreg(MSI_INTERRUPT, 0x01, 1);        // send msi interrupt
-            RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
-            // RWreg(MSI_INTERRUPT, 0x00, 1);        // send msi interrupt
-            // RWreg(MSI_ENABLE, 0xabababab, 1); // enable write msi interrupt
-            printk(KERN_ERR "send msi intr\n");
-#endif
             }
 
         }
@@ -548,8 +544,8 @@ static int pci_rx_handler(
 }
 
 static unsigned int RWreg(unsigned long long BaseAddr, int value, int rw){
+    printk(KERN_ERR "%llx\n", BaseAddr);// debug
     void __iomem *vaddr;
-    void __iomem *tem;
     unsigned int readres = 0;
     int offset = BaseAddr & ~PAGE_MASK;
     BaseAddr &= PAGE_MASK;
@@ -557,7 +553,6 @@ static unsigned int RWreg(unsigned long long BaseAddr, int value, int rw){
     // printk(KERN_ERR "before ioremap,BaseAddr=%x, offset=%x\n",BaseAddr, offset);
     // 使用 ioremap 映射物理地址
     vaddr = ioremap(BaseAddr, PAGE_SIZE);
-    tem = vaddr;
     if (!vaddr) {
         pr_err("Failed to ioremap physical address 0x%llx\n", BaseAddr);
         return -ENOMEM;
@@ -565,17 +560,15 @@ static unsigned int RWreg(unsigned long long BaseAddr, int value, int rw){
 
     // printk(KERN_ERR "after ioremap,BaseAddr=%x, offset=%x\n",BaseAddr, offset);
     // 访问映射的内存
-    if(rw){
+    if(rw) {
         iowrite32(value, vaddr+offset);
         // printk(KERN_ERR "Written value=0x%x to address 0x%llx\n", value, BaseAddr+offset);
-    }else{
+    } else {
         readres = ioread32(vaddr+offset);
         // printk(KERN_ERR "read value=0x%x from address 0x%llx\n", readres, BaseAddr+offset);
     }
 
     // 取消映射
-    if(tem != vaddr)
-        printk(KERN_ERR "error vaddr changed\n");
     iounmap(vaddr);
     return readres;
 }
@@ -610,7 +603,7 @@ void invalidate_cache(void *start, size_t size) {
     while (addr < end) { 
         asm volatile ("dc ivac, %0" :: "r"(addr) : "memory"); 
         addr += 64; 
-    }
+    } 
 
     // 确保所有缓存操作完成
     asm volatile ("dsb sy" ::: "memory");
