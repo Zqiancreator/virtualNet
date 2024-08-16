@@ -1,0 +1,64 @@
+/include/ "system-conf.dtsi"
+ / {
+amba_pl: amba_pl{
+                #address-cells = <1>;
+                #size-cells = <1>;
+                compatible = "simple-bus";
+                ranges;
+                irq: irq@0{
+                        compatible = "hello,irq";
+                        interrupt-parent = <&gic>;
+                        interrupts = <0 89 2>;
+                };
+                irq1: irq@1{
+                        compatible = "test,irq1";
+                        interrupt-parent = <&gic>;
+                        interrupts = <0 105 2>;
+                };
+        };
+};
+ /* SD */
+ &sdhci1 {
+ disable-wp;
+ no-1-8-v;
+ };
+ /* USB */
+ &dwc3_0 {
+ status = "okay";
+ dr_mode = "host";
+ };
+
+&qspi {
+         #address-cells = <1>;
+          #size-cells = <0>;
+           status = "okay";
+           is-dual = <0>;
+           num-cs = <1>;
+           flash0: flash@0 {
+                compatible = "n25q128a11";
+                reg = <0x0>;
+                spi-tx-bus-width = <1>;
+                spi-rx-bus-width = <4>;
+                spi-max-frequency = <50000000>;
+                #address-cells = <1>;
+                #size-cells = <1>;
+                partition@0 {  
+                        label = "boot";
+                        reg = <0x03000000 0x03000000>;
+                };
+                partition@1 {
+                        label = "bootenv";
+                        reg = <0x06000000 0x00010000>;
+                };
+                partition@2 {
+                        label = "kernel";    
+                        reg = <0x06010000 0x01500000>;
+                };
+                partition@3 {
+                        label = "bootscr";
+                        reg = <0x07510000 0x00010000>;
+                };
+        };
+};
+
+
